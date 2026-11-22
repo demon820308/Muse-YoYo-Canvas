@@ -58,7 +58,7 @@ async function spawnImageGeneration(
     return { status: "failed", error: message };
   }
   const refLines = refs
-    .map((r, i) => `参考图 ${i + 1}：${r.title || "未命"}）：${r.filePath}`)
+    .map((r, i) => `参考图 ${i + 1}（${r.title || "未命名"}）：${r.filePath}`)
     .join("\n");
   const message = [
     `任务：为YoYo画布的一个节点生成一张图片，并把成片文件路径通过 completeImageGeneration 动作回传（runtime 会注入调用该动作的说明）。`,
@@ -263,7 +263,7 @@ export async function dispatchVideoGeneration(
   const usableRefs = allImageRefs.filter((r) => r.filePath);
   const missingCount = allImageRefs.length - usableRefs.length;
   const refLines = usableRefs
-    .map((r, i) => `参考图 ${i + 1}：${r.title || "未命"}）：${r.filePath}`)
+    .map((r, i) => `参考图 ${i + 1}（${r.title || "未命名"}）：${r.filePath}`)
     .join("\n");
   const duration = clampVideoSeconds(node.genDuration);
   const ratioNode =
@@ -332,7 +332,7 @@ export async function dispatchAudioGeneration(
     .filter((r) => r.filePath)
     .map(
       (r) =>
-        `参：${r.type === "audio" ? "音频" : r.type === "video" ? "视频" : "图片"}：${r.title || "未命"}）：${r.filePath}`,
+        `参考${r.type === "audio" ? "音频" : r.type === "video" ? "视频" : "图片"}（${r.title || "未命名"}）：${r.filePath}`,
     )
     .join("\n");
   const message = [

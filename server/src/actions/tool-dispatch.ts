@@ -33,8 +33,8 @@ import {
  * canvas file itself is never modified — only the copy sent at
  * click time is shrunk （抽帧产出不压，Wei 2026-11-15 拍板 B 方案
  */
-const REVERSE_SEND_MAX_EDGE = 2048;
-const REVERSE_SEND_MAX_BYTES = 3 * 1024 * 1024;
+const REVERSE_SEND_MAX_EDGE = 1536;
+const REVERSE_SEND_MAX_BYTES = 1 * 1024 * 1024;
 
 /** Reads a produced file from the project directory, stores it as a
  * blob, probes its real size, and attaches it as a result node. */
@@ -465,7 +465,7 @@ async function runPromptReverseTool(
       {
         input: sendSourcePath,
         outputDir: outDir,
-        fileName: `reverse-send-${tag}.${file.contentType === "image/jpeg" ? "jpg" : "png"}`,
+        fileName: `reverse-send-${tag}.jpg`,
         maxEdge: REVERSE_SEND_MAX_EDGE,
         maxBytes: REVERSE_SEND_MAX_BYTES,
       },
@@ -473,6 +473,7 @@ async function runPromptReverseTool(
     file = await ctx.executePrivileged(Contracts.readMediaFile, {
       path: shrunk.path,
     });
+    sendSourcePath = shrunk.path;
     sentWidth = shrunk.width;
     sentHeight = shrunk.height;
   }

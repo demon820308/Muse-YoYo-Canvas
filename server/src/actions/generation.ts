@@ -65,7 +65,7 @@ import { Contracts } from "@space/privileged";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import * as schema from "../schema";
 import { nodeType, TOOL_TYPES, genStatusEnum, genKindEnum, okResponse, genResult, completeResult, type Db } from "./contracts";
-import { getNodeRow, getProjectRow, landMediaResult, recordMediaAsset, markFailed, markWorking } from "./graph-helpers";
+import { getNodeRow, getProjectRow, landMediaResult, recordMediaAsset, markFailed, markWorking, forkSiblingForRegen } from "./graph-helpers";
 import { recordGenerationOutcome } from "./generation-records";
 import { expandHome, isInProjectDir } from "./project-dirs";
 import { clampVideoSeconds } from "./ratios";
@@ -86,8 +86,9 @@ export const GenerationActions = {
       if (!node || node.projectId !== args.projectId) {
         return { status: "failed" as const, error: "节点不存" };
       }
-      await markWorking(db, node.id, { genKind: "image" });
-      const fresh = (await getNodeRow(db, node.id)) ?? node;
+      const target = await forkSiblingForRegen(db, node);
+      await markWorking(db, target.id, { genKind: "image" });
+      const fresh = (await getNodeRow(db, target.id)) ?? target;
       const result = await dispatchImageGeneration(ctx, db, fresh);
       ctx.invalidateQueries();
       return { status: result.status, error: result.error };
@@ -109,11 +110,12 @@ export const GenerationActions = {
       if (!node || node.projectId !== args.projectId) {
         return { status: "failed" as const, error: "节点不存" };
       }
-      await markWorking(db, node.id, {
+      const target = await forkSiblingForRegen(db, node);
+      await markWorking(db, target.id, {
         genKind: "video",
         genDuration: clampVideoSeconds(args.duration ?? node.genDuration),
       });
-      const fresh = (await getNodeRow(db, node.id)) ?? node;
+      const fresh = (await getNodeRow(db, target.id)) ?? target;
       const result = await dispatchVideoGeneration(ctx, db, fresh);
       ctx.invalidateQueries();
       return {
@@ -134,8 +136,9 @@ export const GenerationActions = {
       if (!node || node.projectId !== args.projectId) {
         return { status: "failed" as const, error: "节点不存" };
       }
-      await markWorking(db, node.id, { genKind: "audio" });
-      const fresh = (await getNodeRow(db, node.id)) ?? node;
+      const target = await forkSiblingForRegen(db, node);
+      await markWorking(db, target.id, { genKind: "audio" });
+      const fresh = (await getNodeRow(db, target.id)) ?? target;
       const result = await dispatchAudioGeneration(ctx, db, fresh);
       ctx.invalidateQueries();
       return {
@@ -236,18 +239,19 @@ export const GenerationActions = {
       if (TOOL_TYPES.has(node.type)) {
         throw new Error("enqueueGeneration: 工具节点不进生成队列，请在节点上点运");
       }
+      const target = await forkSiblingForRegen(db, node);
       await db
         .update(schema.canvasNodes)
         .set({
           genStatus: "queued",
-          genKind: queueKindFor(node),
+          genKind: queueKindFor(target),
           genError: null,
           genTaskId: null,
           genClaimToken: null,
           genStartedAt: null,
           updatedAt: new Date(),
         })
-        .where(eq(schema.canvasNodes.id, node.id));
+        .where(eq(schema.canvasNodes.id, target.id));
       ctx.invalidateQueries();
       return { ok: true };
     },

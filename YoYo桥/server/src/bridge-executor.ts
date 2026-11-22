@@ -228,8 +228,8 @@ error: null,
 });
 }
 
-const INFERENCE_MAX_BYTES = 3 * 1024 * 1024;
-const INFERENCE_MAX_EDGE = 2048;
+const INFERENCE_MAX_BYTES = 1 * 1024 * 1024;
+const INFERENCE_MAX_EDGE = 1536;
 
 async function executePromptReverse(
 ctx: Ctx,
@@ -285,7 +285,7 @@ Contracts.shrinkImageForInference,
 {
 input: currentPath,
 outputDir: dir.path,
-fileName: file.contentType === "image/png"? "shrunk.png": "shrunk.jpg",
+fileName: "shrunk.jpg",
 maxEdge: INFERENCE_MAX_EDGE,
 maxBytes: INFERENCE_MAX_BYTES,
 },

@@ -661,6 +661,30 @@ describe("executor: prompt-reverse", () => {
     expect(after?.resultType).toBe("text");
     expect(after?.resultTitle).toBe("逆推结果");
   });
+
+  test("超限 PNG（如 1152x2048 2.59MB）先压成 shrunk.jpg 再送 inference", async () => {
+    const { db } = makeDb();
+    await insertJob(db, "pr-shrink", "prompt-reverse", {
+      prompt: "请逆推这张图",
+      imageFilePath: "/home/u/yoyo-canvas-projects/p1/img.png",
+    });
+    const row = await getBridgeJob(db, "pr-shrink");
+    const { ctx, calls } = makeFakeCtx(db, {
+      readFile: {
+        dataBase64: Buffer.from("img").toString("base64"),
+        sizeBytes: Math.round(2.59 * 1024 * 1024),
+        contentType: "image/png",
+      },
+      probe: { width: 1152, height: 2048, durationSeconds: null },
+    });
+    const transport = fakeTransport(async () => new Uint8Array([5, 5]));
+    await executeSyncJob(ctx, db, transport, row!);
+    const shrinkCall = calls.priv.find((c) => c.name === "shrinkImageForInference");
+    expect(shrinkCall?.args.fileName).toBe("shrunk.jpg");
+    expect(shrinkCall?.args.maxEdge).toBe(1536);
+    expect(shrinkCall?.args.maxBytes).toBe(1 * 1024 * 1024);
+    expect(calls.inference.length).toBe(1);
+  });
 });
 
 describe("对账：本地已取消的 queued 孤儿行", () => {

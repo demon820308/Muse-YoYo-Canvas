@@ -4,8 +4,8 @@
 界面与交互与云端版一致，平台依赖收敛到一个本地垫层（见
 `PLATFORM-TOUCHPOINTS.md`），数据全部在本地 `./data/`，
 生成走「本地队列 + 云端桥」口径（S1 方案）：点生成先写入本地
-桥队列并显示等待状态，桥（第三步施工）接通后由云端 Space 生成
-并把结果送回落地。本目录与云端 Space 互不影响。
+桥队列并显示等待状态，桥接通后由独立云端 Space「YoYo桥」生成
+并把结果送回落地。本目录与云端画布 Space 互不影响。
 
 ## 启动
 
@@ -26,10 +26,11 @@
 
 ```bash
 bun install
-bun run build:client  # 前端构建（client/build-local.mjs）
-bun run local:start   # 起服务（或 bun run local:dev 一步到位）
-bun run typecheck     # 类型检查（client + server）
-bun run test          # 服务端特征测试
+bun run build:client   # 前端构建（client/build-local.mjs）
+bun run local:start    # 起服务（或 bun run local:dev 一步到位）
+bun run local:diagnose # 一键生成脱敏诊断报告（scripts/diagnose.ts）
+bun run typecheck      # 类型检查（client + server）
+bun run test           # 全量测试（server + local + client）
 ```
 
 ## 随包运行时（Windows 放置方式）
@@ -49,7 +50,7 @@ bun run test          # 服务端特征测试
 | `data/exports/`、`data/imports/` | 项目包导出/导入的暂存（用后自动清理） |
 | `data/bridge.json` | 桥账号档案（多账号手动切换，见下） |
 
-备份 = 拷贝整个 `data/`。删掉 `data/` 等于恢复出厂（项目与资产全清）。
+备份 = 运行 `backup.bat`（复制到 `backup/data-<时间戳>/`）或手动拷贝整个 `data/`。删掉 `data/` 等于恢复出厂（项目与资产全清）。
 
 ## 桥账号档案（多账号手动切换）
 
@@ -168,10 +169,13 @@ bun run test          # 服务端特征测试
 | --- | --- |
 | `client/` | React 前端（与云端同源；仅 `src/api.ts` 改为 fetch 客户端，另加 `build-local.mjs`） |
 | `server/` | 服务端 actions 与特权层实现（与云端同源；定点适配清单见 PLATFORM-TOUCHPOINTS.md 第五节） |
-| `local/` | 本地运行时：HTTP 服务、ctx 垫层、db、blobs、桥端点、桥账号档案与管理页 |
+| `local/` | 本地运行时：HTTP 服务、ctx 垫层、db、blobs、桥端点、桥账号档案、管理页与隧道向导 |
 | `packages/local-sdk/` | `@hatch/space-sdk` 本地垫片（只实现源码用到的表面） |
+| `YoYo桥/` | 独立云端桥 Space（`yoyo-bridge`）源码快照与部署/使用文档 |
 | `drizzle/` | 云端原迁移 0001–0014（逐字保留） |
-| `scripts/` | smoke-local.ts（本机实测）、migrate-package.ts（迁移）、make-fixture-package.ts + fixtures/（演练素材） |
+| `scripts/` | diagnose.ts（一键诊断）、smoke-local.ts（本机实测）、migrate-package.ts（迁移）、make-fixture-package.ts + fixtures/（演练素材） |
+| `backup.bat` | Windows 一键备份 `data/` 到 `backup/data-<时间戳>/` |
+| `.github/workflows/ci.yml` | GitHub Actions CI（typecheck / test / build:client） |
 | `server/.generated/` | 云端构建的特权契约抽取物，本地不引用（本地 tsconfig 直指 `server/src/privileged.ts`），保留作对照 |
 
 ## 已知边界

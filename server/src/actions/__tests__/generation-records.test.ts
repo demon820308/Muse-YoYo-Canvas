@@ -17,7 +17,7 @@ import {
   recordGenerationOutcome,
   runStartedAt,
 } from "../generation-records";
-import { landMediaResult, markFailed } from "../graph-helpers";
+import { forkSiblingForRegen, landMediaResult, markFailed } from "../graph-helpers";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "..", "..", "..", "..", "drizzle");
 
@@ -280,5 +280,46 @@ describe("共享终态路径", () => {
       .delete(schema.canvasNodes)
       .where(eq(schema.canvasNodes.id, "n7"));
     expect((await recordsOf(db)).length).toBe(1);
+  });
+});
+
+describe("forkSiblingForRegen", () => {
+  test("空白占位节点原地跑；已有成品节点在下方建平行兄弟并复制全部入边", async () => {
+    const db = await makeDb();
+    const blank = await seedNode(db, { id: "v-blank", type: "video", mediaBlobKey: null });
+    expect((await forkSiblingForRegen(db, blank)).id).toBe("v-blank");
+
+    await seedNode(db, { id: "up-1", type: "image", x: 0, y: 0 });
+    await seedNode(db, { id: "up-2", type: "image", x: 0, y: 260 });
+    const filled = await seedNode(db, {
+      id: "v-done",
+      type: "video",
+      x: 400,
+      y: 100,
+      width: 420,
+      height: 236,
+      prompt: "测试提示词",
+      genRatio: "16:9",
+      genDuration: 6,
+      mediaBlobKey: "media/proj-1/v0",
+    });
+    await db.insert(schema.canvasEdges).values([
+      { id: "e1", projectId: "proj-1", fromNodeId: "up-1", toNodeId: "v-done", sortOrder: 0, createdAt: T0 },
+      { id: "e2", projectId: "proj-1", fromNodeId: "up-2", toNodeId: "v-done", sortOrder: 1, createdAt: T0 },
+    ]);
+
+    const sibling = await forkSiblingForRegen(db, filled);
+    expect(sibling.id).not.toBe("v-done");
+    expect(sibling.x).toBe(400);
+    expect(sibling.y).toBe(100 + 236 + 28);
+    expect(sibling.mediaBlobKey).toBeNull();
+    expect(sibling.prompt).toBe("测试提示词");
+    expect(sibling.genDuration).toBe(6);
+
+    const edgesToSibling = await db
+      .select()
+      .from(schema.canvasEdges)
+      .where(eq(schema.canvasEdges.toNodeId, sibling.id));
+    expect(edgesToSibling.map((e) => e.fromNodeId).sort()).toEqual(["up-1", "up-2"]);
   });
 });

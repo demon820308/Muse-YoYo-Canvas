@@ -279,6 +279,14 @@ const runGeneration = useCallback(
       } else if (res.status === "working") {
         // Background run: the feedback entry stays active and the
         // genStatus watcher settles it when the result lands.
+        const isRegenFork =
+          node.mediaBlobKey != null &&
+          (node.type === "image" ||
+            node.type === "video" ||
+            node.type === "audio");
+        if (isRegenFork) {
+          settleRunFeedback(node.id, "done");
+        }
         showToast("已开始后台生成，完成后结果会自动上板");
       } else {
         showToast(`生成失败：${res.error ?? "未知原因"}`);

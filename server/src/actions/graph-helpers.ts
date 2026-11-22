@@ -310,6 +310,98 @@ export async function fillResultIntoNode(
   return source.id;
 }
 
+/** Forks a parallel sibling node directly below `source` (inheriting
+ * its prompt, ratio/duration settings, and all incoming edges from
+ * upstream nodes) when regenerating a media node that already holds
+ * a finished result. Blank placeholders and failed retries still run
+ * in-place on `source` itself. */
+export async function forkSiblingForRegen(
+  db: Db,
+  source: NodeRow,
+): Promise<NodeRow> {
+  if (
+    !source.mediaBlobKey ||
+    (source.type !== "image" &&
+      source.type !== "video" &&
+      source.type !== "audio")
+  ) {
+    return source;
+  }
+  const siblings = await db
+    .select({
+      x: schema.canvasNodes.x,
+      y: schema.canvasNodes.y,
+      width: schema.canvasNodes.width,
+      height: schema.canvasNodes.height,
+    })
+    .from(schema.canvasNodes)
+    .where(eq(schema.canvasNodes.projectId, source.projectId));
+  const stepY = source.height + 28;
+  let chosenY = source.y + stepY;
+  for (let row = 1; row <= 20; row += 1) {
+    const yy = source.y + row * stepY;
+    const hit = siblings.some(
+      (s) =>
+        source.x < s.x + s.width &&
+        source.x + source.width > s.x &&
+        yy < s.y + s.height &&
+        yy + source.height > s.y,
+    );
+    if (!hit) {
+      chosenY = yy;
+      break;
+    }
+  }
+  const newId = crypto.randomUUID();
+  const now = new Date();
+  const [newSeq] = await reserveNodeSeqs(db, source.projectId, 1);
+  await db.insert(schema.canvasNodes).values({
+    id: newId,
+    projectId: source.projectId,
+    seq: newSeq ?? null,
+    type: source.type,
+    title: source.title,
+    x: source.x,
+    y: chosenY,
+    width: source.width,
+    height: source.height,
+    content: source.content,
+    prompt: source.prompt,
+    status: "idle",
+    hidden: false,
+    groupId: source.groupId,
+    color: source.color,
+    genStatus: "idle",
+    genRatio: source.genRatio,
+    genSize: null,
+    genDuration: source.genDuration,
+    genKind: source.genKind,
+    mediaBlobKey: null,
+    mimeType: null,
+    filePath: null,
+    posterBlobKey: null,
+    proxyBlobKey: null,
+    sortOrder: siblings.length,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const incoming = await db
+    .select()
+    .from(schema.canvasEdges)
+    .where(eq(schema.canvasEdges.toNodeId, source.id));
+  for (const edge of incoming) {
+    await db.insert(schema.canvasEdges).values({
+      id: crypto.randomUUID(),
+      projectId: source.projectId,
+      fromNodeId: edge.fromNodeId,
+      toNodeId: newId,
+      sortOrder: edge.sortOrder,
+      createdAt: now,
+    });
+  }
+  return (await getNodeRow(db, newId)) ?? source;
+}
+
 /** Lands a generated media result: into the source node itself when
  * the source IS a node of the result's kind (the placeholder the user
  * ran — no new node, no new edge), otherwise as a fresh result node
