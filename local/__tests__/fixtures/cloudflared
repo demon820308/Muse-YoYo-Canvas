@@ -1,0 +1,38 @@
+#!/bin/bash
+# 假 cloudflared 替身（隧道向导测试用）：按 FAKE_CF_MODE 应答。
+#   FAKE_CF_MODE=with     tunnel list 返回已建的 yoyo-bridge
+#   FAKE_CF_MODE=without  tunnel list 返回空
+# tunnel create 产出固定假 ID 并在 $HOME/.cloudflared 落凭据 json；
+# tunnel route 把调用参数追加到 $HOME/route-dns.log 备查。
+FAKE_ID="11111111-2222-3333-4444-555555555555"
+if [ "$1" = "--version" ]; then
+  echo "cloudflared version 2024.11.0 (built 2024-11-01)"
+  exit 0
+fi
+if [ "$1" = "tunnel" ] && [ "$2" = "list" ]; then
+  if [ "$FAKE_CF_MODE" = "with" ]; then
+    echo "[{\"ID\":\"$FAKE_ID\",\"NAME\":\"yoyo-bridge\",\"CREATED_AT\":\"2026-01-01T00:00:00Z\",\"CONNECTIONS\":[]}]"
+  else
+    echo "[]"
+  fi
+  exit 0
+fi
+if [ "$1" = "tunnel" ] && [ "$2" = "create" ]; then
+  mkdir -p "$HOME/.cloudflared"
+  printf '{"AccountTag":"fake","TunnelSecret":"fake","TunnelID":"%s"}\n' "$FAKE_ID" > "$HOME/.cloudflared/$FAKE_ID.json"
+  echo "Created tunnel $3 with id $FAKE_ID"
+  exit 0
+fi
+if [ "$1" = "tunnel" ] && [ "$2" = "route" ]; then
+  echo "$*" >> "$HOME/route-dns.log"
+  echo "Added CNAME $5 which will route to this tunnel"
+  exit 0
+fi
+if [ "$1" = "tunnel" ] && [ "$2" = "login" ]; then
+  mkdir -p "$HOME/.cloudflared"
+  echo "fake-cert" > "$HOME/.cloudflared/cert.pem"
+  echo "You have successfully logged in."
+  exit 0
+fi
+echo "fake cloudflared: unhandled args: $*" >&2
+exit 1

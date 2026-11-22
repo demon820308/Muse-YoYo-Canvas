@@ -1,0 +1,11 @@
+{
+  "entry": "client/dist/index.html",
+  "managedCronJobs": [
+    "yoyo-bridge-sync",
+    "yoyo-bridge-fast"
+  ],
+  "name": "YoYo桥",
+  "platformVersion": 29,
+  "runtime": "typescript",
+  "slug": "yoyo-bridge"
+}

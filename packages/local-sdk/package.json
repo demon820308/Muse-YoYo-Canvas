@@ -1,0 +1,1 @@
+{"description":"YoYo画布本地版的平台垫片：只实现 yoyohua-bu 源码实际用到的 @hatch/space-sdk 表面（defineAction / 契约 / Ctx 类型 / 客户端小工具），运行时由 ~/workspace/yoyo-local/local 的本地 ctx 兑现。","exports":{".":"./index.ts","./client":"./client.ts"},"name":"@hatch/space-sdk","private":true,"type":"module","version":"0.0.0-yoyo-local"}

@@ -1,0 +1,17 @@
+# Dependencies & caches
+node_modules/
+.bun-cache/
+
+# Local runtime & user data (contains app.db, blobs, bridge.json tokens)
+data/
+runtime/
+
+# Build outputs
+client/dist/
+dist/
+build/
+
+# Logs & OS artifacts
+*.log
+.DS_Store
+Thumbs.db
