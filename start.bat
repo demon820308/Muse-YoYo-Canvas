@@ -99,7 +99,7 @@ if not exist "client\dist\index.html" (
 
 echo Starting YoYoCanvas Local at http://127.0.0.1:3737
 start "" /min cmd /c "timeout /t 2 /nobreak >nul & start http://127.0.0.1:3737"
-"%BUN_EXE%" .\local\server.ts
+"%BUN_EXE%" .\local\server.ts || goto :fail
 goto :eof
 
 :fail
