@@ -326,3 +326,62 @@ describe("用 cloudflared 替身（PATH + 临时 HOME）", () => {
     expect((await w.detectTunnel())?.id).toBe(FAKE_ID);
   });
 });
+
+describe("防呆加固：多机隧道名、小写 JSON、防假绿与 530 识别", () => {
+  test("tunnelNameForHostname 从子域名前缀派生隧道名", () => {
+    expect(tunnel.tunnelNameForHostname("yoyo-bridge-home.ck971.cc.cd")).toBe(
+      "yoyo-bridge-home",
+    );
+    expect(tunnel.tunnelNameForHostname("yoyo-bridge.ck971.cc.cd")).toBe(
+      "yoyo-bridge",
+    );
+  });
+
+  test("parseTunnelList 兼容小写 id/name 并忽略已删除隧道", () => {
+    const out = JSON.stringify([
+      { id: "00000000-0000-0000-0000-000000000001", name: "yoyo-bridge-home", deleted_at: "2026-11-22T00:00:00Z" },
+      { id: FAKE_ID, name: "yoyo-bridge-home", deleted_at: "0001-01-01T00:00:00Z" },
+    ]);
+    expect(parseTunnelList(out, "yoyo-bridge-home")?.id).toBe(FAKE_ID);
+  });
+
+  test("classifyDns 校验目标隧道 ID：指向旧隧道判为 mismatch", () => {
+    const otherId = "99999999-8888-7777-6666-555555555555";
+    expect(
+      classifyDns({ cname: [`${otherId}.cfargotunnel.com`], a: [], aaaa: [] }, FAKE_ID),
+    ).toBe("mismatch");
+    expect(
+      classifyDns({ cname: [`${FAKE_ID}.cfargotunnel.com`], a: [], aaaa: [] }, FAKE_ID),
+    ).toBe("created");
+  });
+
+  test("status 防假绿：云端存在但本机无凭据 json 时 tunnel.ok=false；公网 530 降级 DNS 为 mismatch", async () => {
+    const w = new TunnelWizard(
+      fakeDeps({
+        exec: async (_cmd, args) => {
+          if (args[0] === "tunnel" && args[1] === "list") {
+            return {
+              code: 0,
+              out: JSON.stringify([{ id: FAKE_ID, name: "yoyo-bridge-home" }]),
+              err: "",
+            };
+          }
+          return { code: 0, out: "cloudflared version 2026.11.1", err: "" };
+        },
+        resolveDns: async () => ({
+          cname: [`${FAKE_ID}.cfargotunnel.com`],
+          a: [],
+          aaaa: [],
+        }),
+        probeHttp: async () => 530,
+      }),
+    );
+    const s = await w.status("yoyo-bridge-home.ck971.cc.cd", "tok");
+    expect(s.tunnel.existsRemote).toBe(true);
+    expect(s.tunnel.hasCredentials).toBe(false);
+    expect(s.tunnel.ok).toBe(false);
+    expect(s.e2e.ok).toBe(false);
+    expect(s.e2e.needsDnsOverwrite).toBe(true);
+    expect(s.dns.state).toBe("mismatch");
+  });
+});

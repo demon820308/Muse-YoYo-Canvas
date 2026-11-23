@@ -97,6 +97,14 @@ if not exist "client\dist\index.html" (
   "%BUN_EXE%" run build:client || goto :fail
 )
 
+curl.exe -sf --max-time 1 http://127.0.0.1:3737/healthz >nul 2>nul
+if not errorlevel 1 (
+  echo YoYoCanvas Local is already running at http://127.0.0.1:3737
+  start "" http://127.0.0.1:3737
+  timeout /t 2 >nul
+  goto :eof
+)
+
 echo Starting YoYoCanvas Local at http://127.0.0.1:3737
 start "" /min cmd /c "timeout /t 2 /nobreak >nul & start http://127.0.0.1:3737"
 "%BUN_EXE%" .\local\server.ts || goto :fail

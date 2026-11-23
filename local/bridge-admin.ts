@@ -323,11 +323,12 @@ function profileRow(
 
 const JOB_LABELS: Record<JobKind, string> = {
   install: "安装 cloudflared",
-  login: "授权（tunnel login",
-  create: "建隧",
+  login: "授权（tunnel login）",
+  create: "建隧道",
   route: "写子域名解析",
   config: "写 config.yml",
   service: "装 Windows 服务（开机自启）",
+  auto: "一键自动配置（4–8 步）",
 };
 
 function badge(ok: boolean | null, okText = "已完", noText = "未完"): string {
@@ -335,7 +336,11 @@ function badge(ok: boolean | null, okText = "已完", noText = "未完"): string
   return ok ? `<span class="current">✓ ${okText}</span>` : `<span class="muted">✗ ${noText}</span>`;
 }
 
-function tunnelSection(status: TunnelStatus, hostname: string): string {
+function tunnelSection(
+  status: TunnelStatus,
+  hostname: string,
+  activeLabel: string | null,
+): string {
   const jobs = tunnelWizard.listJobs();
   const jobRows = jobs
     .map(
@@ -346,55 +351,89 @@ function tunnelSection(status: TunnelStatus, hostname: string): string {
     .join("\n");
   const logTail = tunnelWizard.tunnelLogTail(20);
   const dis = (cond: boolean) => (cond ? " disabled" : "");
+  const anyRunning = tunnelWizard.anyJobRunning();
+  const remoteNoCred = status.tunnel.existsRemote && !status.tunnel.hasCredentials;
+  const needOverwrite =
+    status.dns.state === "mismatch" || status.e2e.needsDnsOverwrite;
+  const tunnelDetail = status.tunnel.ok
+    ? `已就绪，ID：<code>${esc(status.tunnel.id ?? "")}</code>（本地凭据 .json 已就位）`
+    : remoteNoCred
+      ? `<strong>云端已存在同名隧道（ID：<code>${esc(status.tunnel.id ?? "")}</code>），但本机缺少凭据 .json！</strong>请回第 3 步换一个新的子域名（例如加 <code>-pc2</code>）再建隧道。`
+      : "尚未创建";
+  const publicUrl = `https://${hostname}`;
+  const hostnameLocked = status.tunnel.ok;
+  const hostnameCell = hostnameLocked
+    ? `<form class="inline" method="post" action="/bridge-admin/tunnel/hostname" id="hostname-form" onsubmit="return confirm('确认修改子域名？修改后需重新执行第 4–7 步（建隧道、写解析、写配置、重启服务），并同步更新云端 YoYo 桥里的隧道地址。')">
+      <input type="text" id="hostname-input" name="hostname" value="${esc(hostname)}" data-orig="${esc(hostname)}" size="30" readonly style="opacity:0.75;cursor:not-allowed">
+      <button type="button" id="hostname-edit-btn"${dis(anyRunning)} onclick="var i=document.getElementById('hostname-input');i.readOnly=false;i.style.opacity='1';i.style.cursor='text';i.focus();i.select();this.style.display='none';document.getElementById('hostname-save-btn').style.display='';document.getElementById('hostname-cancel-btn').style.display='';document.getElementById('hostname-warn').style.display='block';">修改</button>
+      <button type="submit" id="hostname-save-btn" style="display:none"${dis(anyRunning)}>保存并检测</button>
+      <button type="button" id="hostname-cancel-btn" style="display:none" onclick="var i=document.getElementById('hostname-input');i.value=i.getAttribute('data-orig')||'';i.readOnly=true;i.style.opacity='0.75';i.style.cursor='not-allowed';this.style.display='none';document.getElementById('hostname-save-btn').style.display='none';document.getElementById('hostname-edit-btn').style.display='';document.getElementById('hostname-warn').style.display='none';">取消</button>
+    </form>
+    <div id="hostname-warn" class="banner" style="display:none;margin-top:6px">⚠ 提醒：当前子域名已建好隧道。修改子域名后需要重新执行第 4–7 步（新建对应隧道、写解析、写配置、重启服务），并同步更新云端 YoYo 桥设置页里的隧道地址。</div>`
+    : `<form class="inline" method="post" action="/bridge-admin/tunnel/hostname">
+      <input type="text" name="hostname" value="${esc(hostname)}" size="30">
+      <button type="submit"${dis(anyRunning)}>保存并检测</button></form>`;
   return `
 <h2>隧道向导（cloudflared 把本地画布接到公网，只放 /bridge/*）</h2>
-<p class="muted">把配对操作单第 1–6、8 步搬进页面：点按钮即可，失败会给出人话原因与可手动兜底的原始命令。第 7 步配对（把档案令牌填到桥 Space
-设置页）仍在那边完成。</p>
-<table><thead><tr><th>检查项</th><th>状态</th></tr></thead><tbody>
+<p class="muted">按 1 → 8 顺序操作：前 3 步完成后，可直接点下方「一键完成 4–8 步」自动串联建隧道、写解析、写配置、装服务与公网体检。</p>
+<div class="banner">
+  <form class="inline" method="post" action="/bridge-admin/tunnel/auto">
+    <button type="submit"${dis(!status.installed.ok || !status.authorized || remoteNoCred || anyRunning)}>一键完成 4–8 步</button>
+  </form>
+  <span class="muted">${!status.installed.ok ? "需先完成第 1 步安装" : !status.authorized ? "需先完成第 2 步授权" : remoteNoCred ? "当前子域名对应的隧道名已被旧机占用，请先在第 3 步更换子域名" : "将自动执行：建隧道 → 覆盖写解析 → 写 config.yml → 装服务 → 端到端体检"}</span>
+</div>
+<table><thead><tr><th>步骤</th><th>状态</th><th>详情与操作</th></tr></thead><tbody>
 <tr><td>1. cloudflared 安装</td>
   <td>${badge(status.installed.ok)}</td>
   <td>${status.installed.ok
     ? `已安装（版本 ${esc(status.installed.version ?? "?")}）`
-    : "未安"}
+    : "未安装"}
     <form class="inline" method="post" action="/bridge-admin/tunnel/install">
-      <button type="submit"${dis(status.installed.ok)}>安装</button></form></td></tr>
+      <button type="submit"${dis(status.installed.ok || anyRunning)}>安装</button></form></td></tr>
 <tr><td>2. Cloudflare 授权</td>
   <td>${badge(status.authorized)}</td>
-  <td>${status.authorized ? "cert.pem 已存在（通行证就位）" : "尚未授权：点按钮后浏览器会打开 Cloudflare 登录页，选中域名 ck971.cc.cd 并点授权；列表里没有这个域名就先停下回报"}
+  <td>${status.authorized ? "cert.pem 已存在（通行证就位）" : "尚未授权：点按钮后浏览器会打开 Cloudflare 登录页，选中域名 ck971.cc.cd 并点授权"}
     <form class="inline" method="post" action="/bridge-admin/tunnel/login">
-      <button type="submit">授权</button></form></td></tr>
-<tr><td>3. 隧道 yoyo-bridge</td>
+      <button type="submit"${dis(!status.installed.ok || anyRunning)}>授权</button></form></td></tr>
+<tr><td>3. 设定本机子域名</td>
+  <td>${badge(isValidHostname(hostname), "已设", "未设")}</td>
+  <td>${hostnameCell}
+    <div class="muted">将使用子域名前缀作为本机独立隧道名：<code>${esc(status.tunnel.name)}</code>（每台机器填不同子域名即可互不冲突）</div></td></tr>
+<tr><td>4. 隧道 ${esc(status.tunnel.name)}</td>
   <td>${badge(status.tunnel.ok)}</td>
-  <td>${status.tunnel.ok ? `已创建，ID：<code>` : "尚未创建"}
+  <td>${tunnelDetail}
     <form class="inline" method="post" action="/bridge-admin/tunnel/create">
-      <button type="submit"${dis(status.tunnel.ok)}>${status.tunnel.ok ? "已创建" : "建隧道"}</button></form></td></tr>
-<tr><td>4. 子域名</td>
+      <button type="submit"${dis(!status.authorized || status.tunnel.ok || remoteNoCred || anyRunning)}>${status.tunnel.ok ? "已就绪" : "建隧道"}</button></form></td></tr>
+<tr><td>5. 子域名解析（DNS）</td>
   <td>${badge(status.dns.state === "created" ? true : status.dns.state === "unknown" ? null : false)}</td>
-  <td><form class="inline" method="post" action="/bridge-admin/tunnel/hostname">
-      <input type="text" name="hostname" value="${esc(hostname)}" size="30">
-      <button type="submit">保存并检测</button></form>
-    <div>${esc(status.dns.detail)}</div>
-    <form class="inline" method="post" action="/bridge-admin/tunnel/route">
-      <button type="submit"${dis(status.dns.state === "created")}>写解析（route dns）</button></form></td></tr>
-<tr><td>5. config.yml</td>
+  <td>${esc(status.dns.detail)}
+    <form class="inline" method="post" action="${needOverwrite ? "/bridge-admin/tunnel/route-overwrite" : "/bridge-admin/tunnel/route"}">
+      <button type="submit"${dis(!status.tunnel.ok || (!needOverwrite && status.dns.state === "created") || anyRunning)}>${needOverwrite ? "覆盖写解析（--overwrite-dns）" : "写解析（route dns）"}</button></form></td></tr>
+<tr><td>6. config.yml</td>
   <td>${badge(status.config.ok)}</td>
   <td>${esc(status.config.detail)}
     <form class="inline" method="post" action="/bridge-admin/tunnel/config">
-      <button type="submit">写配置</button></form>
+      <button type="submit"${dis(!status.tunnel.ok || anyRunning)}>写配置</button></form>
     <span class="muted">写入 ~/.cloudflared/config.yml，已有文件先备份为 .bak</span></td></tr>
-<tr><td>6. 隧道运行</td>
-  <td>${badge(status.running.ok)}</td>
-  <td>${esc(status.running.detail)}
-    <form class="inline" method="post" action="/bridge-admin/tunnel/run">
-      <button type="submit">运行</button></form>
-    <form class="inline" method="post" action="/bridge-admin/tunnel/stop">
-      <button type="submit">停止（本页托管）</button></form></td></tr>
-<tr><td>7. 开机自启（Windows 服务）</td>
-  <td>${badge(status.service.state === "running" ? true : status.service.state === "unknown" ? null : false)}</td>
-  <td>${esc(status.service.detail)}
+<tr><td>7. 隧道运行 / 开机自启</td>
+  <td>${badge(status.service.state === "running" || status.running.ok ? true : status.service.state === "unknown" ? null : false)}</td>
+  <td><div>运行态：${esc(status.running.detail)} · Windows 服务：${esc(status.service.detail)}</div>
     <form class="inline" method="post" action="/bridge-admin/tunnel/service">
-      <button type="submit">装服务</button></form>
-    <span class="muted">会弹管理员确认框（UAC），点「是」</span></td></tr>
+      <button type="submit"${dis(!status.config.ok || anyRunning)}>装服务（开机自启）</button></form>
+    <form class="inline" method="post" action="/bridge-admin/tunnel/run">
+      <button type="submit"${dis(!status.config.ok || anyRunning)}>前台运行</button></form>
+    <form class="inline" method="post" action="/bridge-admin/tunnel/stop">
+      <button type="submit">停止（本页托管）</button></form>
+    <span class="muted">装服务会弹 UAC，点「是」</span></td></tr>
+<tr><td>8. 端到端公网体检</td>
+  <td>${badge(status.e2e.ok, "已通", "未通")}</td>
+  <td><div>${esc(status.e2e.detail)}</div>
+    <div>云端 YoYo 桥填写地址：<code>${esc(publicUrl)}</code>
+      <button type="button" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(publicUrl)}').then(()=>{this.textContent='已复制';setTimeout(()=>{this.textContent='复制地址'},1500)})">复制地址</button>
+      ${activeLabel ? `<span class="muted">（当前启用账号：${esc(activeLabel)}）</span>` : `<span class="muted">（请先在上方新增并启用一个桥账号）</span>`}
+    </div>
+    ${status.e2e.needsDnsOverwrite ? `<form class="inline" method="post" action="/bridge-admin/tunnel/route-overwrite"><button type="submit"${dis(!status.tunnel.ok || anyRunning)}>一键覆盖解析修复 530</button></form>` : ""}
+    <a href="/bridge-admin"><button type="button">重新体检</button></a></td></tr>
 </tbody></table>
 ${logTail.length ? `<h3>隧道运行日志（最近）</h3><pre>${esc(logTail.join("\n"))}</pre>` : ""}
 ${jobs.length ? `<h3>向导操作记录</h3><table><thead><tr><th>操作</th><th>状态</th><th>结果</th></tr></thead><tbody>${jobRows}</tbody></table>` : ""}`;
@@ -411,8 +450,10 @@ async function renderList(deps: Deps, notice = ""): Promise<Response> {
     ? `<div class="banner">当前由环境变量 <code>YOYO_BRIDGE_TOKEN</code> 临时接管。       桥端点只认环境变量里的令牌，下方文件档案暂时让位；增删改照常落盘；       移除环境变量并重启后生效。</div>`
     : "";
   const hostname = tunnelWizard.savedHostname();
-  const tStatus = await tunnelWizard.status(hostname);
-  const tunnelHtml = tunnelSection(tStatus, hostname);
+  const activeProfile =
+    eff.profiles.find((p) => p.id === eff.activeProfileId) ?? null;
+  const tStatus = await tunnelWizard.status(hostname, activeProfile?.token ?? null);
+  const tunnelHtml = tunnelSection(tStatus, hostname, activeProfile?.label ?? null);
   const busy = tunnelWizard.anyJobRunning() || tunnelWizard.childRunning();
   const body = `
 <h1>桥账号管理 · 多账号手动切换</h1>
@@ -519,11 +560,21 @@ export async function handleBridgeAdmin(
           tunnelWizard.startLogin();
           return redirectToList();
         case "create":
-          tunnelWizard.startCreate();
+          tunnelWizard.startCreate(hostname);
           return redirectToList();
         case "route":
-          tunnelWizard.startRoute(hostname);
+          tunnelWizard.startRoute(hostname, false);
           return redirectToList();
+        case "route-overwrite":
+          tunnelWizard.startRoute(hostname, true);
+          return redirectToList();
+        case "auto": {
+          const eff = effectiveProfiles();
+          const active =
+            eff.profiles.find((p) => p.id === eff.activeProfileId) ?? null;
+          tunnelWizard.startAutoSetup(hostname, active?.token ?? null);
+          return redirectToList();
+        }
         case "config":
           tunnelWizard.startWriteConfig(hostname);
           return redirectToList();
@@ -538,7 +589,7 @@ export async function handleBridgeAdmin(
               `<div class="banner">Cloudflared 已由 Windows 服务在运行，不再重复拉起（重复运行会冲突）。</div>`,
             );
           }
-          const msg = tunnelWizard.startRun();
+          const msg = tunnelWizard.startRun(hostname);
           return renderList(deps, `<div class="banner">${esc(msg)}</div>`);
         }
         case "stop": {

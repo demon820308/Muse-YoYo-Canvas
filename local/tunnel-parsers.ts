@@ -14,6 +14,14 @@ export function isValidHostname(value: string): boolean {
     .every((seg) => /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(seg));
 }
 
+/** 从子域名前缀派生隧道名（如 yoyo-bridge-home.ck971.cc.cd -> yoyo-bridge-home），默认回退 yoyo-bridge。 */
+export function tunnelNameForHostname(hostname: string): string {
+  const norm = hostname.trim().toLowerCase();
+  if (!isValidHostname(norm)) return TUNNEL_NAME;
+  const prefix = norm.split(".")[0];
+  return prefix && prefix.length > 0 ? prefix : TUNNEL_NAME;
+}
+
 export function parseVersionOutput(out: string): string | null {
   const m =
     out.match(/cloudflared\s+version\s+([0-9][^\s]*)/i) ??
@@ -25,10 +33,25 @@ export type TunnelInfo = { id: string; name: string };
 
 export function parseTunnelList(out: string, name: string): TunnelInfo | null {
   try {
-    const rows = JSON.parse(out) as { ID?: string; NAME?: string }[];
+    const rows = JSON.parse(out) as {
+      ID?: string;
+      NAME?: string;
+      id?: string;
+      name?: string;
+      deleted_at?: string;
+    }[];
     if (!Array.isArray(rows)) return null;
-    const hit = rows.find((r) => r.NAME === name && typeof r.ID === "string");
-    return hit ? { id: hit.ID!, name: hit.NAME! } : null;
+    const hit = rows.find((r) => {
+      const rName = r.NAME ?? r.name;
+      const rId = r.ID ?? r.id;
+      const deleted =
+        typeof r.deleted_at === "string" &&
+        r.deleted_at !== "" &&
+        !r.deleted_at.startsWith("0001-01-01");
+      return !deleted && rName === name && typeof rId === "string" && rId.length > 0;
+    });
+    if (!hit) return null;
+    return { id: (hit.ID ?? hit.id)!, name: (hit.NAME ?? hit.name)! };
   } catch {
     return null;
   }
@@ -40,15 +63,25 @@ export function extractTunnelId(text: string): string | null {
 }
 
 export type DnsRecords = { cname: string[]; a: string[]; aaaa: string[] };
-export type DnsState = "created" | "occupied" | "free";
+export type DnsState = "created" | "mismatch" | "occupied" | "free";
 
-/** 子域名三态：CNAME 指向 *.cfargotunnel.com = 已创建（隧道记录）；
- * 有任何其它记录 = 已被占用；无记录 = 未创建可用。 */
-export function classifyDns(records: DnsRecords): DnsState {
-  const isTunnel = records.cname.some((c) =>
-    c.toLowerCase().replace(/\.$/, "").endsWith(".cfargotunnel.com"),
-  );
-  if (isTunnel) return "created";
+/** 子域名四态：
+ * - 若传入 expectedTunnelId：CNAME 精确命中 `<id>.cfargotunnel.com` = created；命中其它 `*.cfargotunnel.com` = mismatch；
+ * - 未传 expectedTunnelId：任意 `*.cfargotunnel.com` = created；
+ * - 有任何其它记录 = occupied；无记录 = free。 */
+export function classifyDns(
+  records: DnsRecords,
+  expectedTunnelId?: string | null,
+): DnsState {
+  const normCnames = records.cname.map((c) => c.toLowerCase().replace(/\.$/, ""));
+  const tunnelCnames = normCnames.filter((c) => c.endsWith(".cfargotunnel.com"));
+  if (tunnelCnames.length > 0) {
+    if (expectedTunnelId) {
+      const target = `${expectedTunnelId.toLowerCase()}.cfargotunnel.com`;
+      return tunnelCnames.includes(target) ? "created" : "mismatch";
+    }
+    return "created";
+  }
   if (records.cname.length || records.a.length || records.aaaa.length) {
     return "occupied";
   }

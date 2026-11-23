@@ -29,6 +29,7 @@ import {
   parseTunnelList,
   parseVersionOutput,
   TUNNEL_NAME,
+  tunnelNameForHostname,
   type DnsRecords,
   type DnsState,
   type TunnelInfo,
@@ -44,6 +45,7 @@ export {
   parseTunnelList,
   parseVersionOutput,
   TUNNEL_NAME,
+  tunnelNameForHostname,
   type DnsRecords,
   type DnsState,
   type TunnelInfo,
@@ -63,6 +65,7 @@ export type TunnelDeps = {
   homeDir: () => string;
   platform: () => string;
   probe: (hostname: string) => Promise<boolean>;
+  probeHttp?: (hostname: string, token?: string | null) => Promise<number | null>;
 };
 
 const WIN_FALLBACK_BINS: Record<string, string[]> = {
@@ -188,17 +191,28 @@ async function defaultResolveDns(hostname: string): Promise<DnsRecords> {
   return { cname, a: a.filter((ip) => !FAKE_IP_RE.test(ip)), aaaa };
 }
 
-async function defaultProbe(hostname: string): Promise<boolean> {
+async function defaultProbeHttp(
+  hostname: string,
+  token?: string | null,
+): Promise<number | null> {
   try {
-    // 401/503/200 任何 HTTP 响应都说明隧道已通到本地后端
-    await fetch(`https://${hostname}/bridge/pending`, {
+    const headers: Record<string, string> = {};
+    if (token) headers.authorization = `Bearer ${token}`;
+    const res = await fetch(`https://${hostname}/bridge/pending`, {
+      headers,
       signal: AbortSignal.timeout(5_000),
       redirect: "manual",
     });
-    return true;
+    return res.status;
   } catch {
-    return false;
+    return null;
   }
+}
+
+async function defaultProbe(hostname: string): Promise<boolean> {
+  const status = await defaultProbeHttp(hostname);
+  // 只有 200/401 才证明请求穿透隧道到达本地后端；530/502/503 都是 Cloudflare 隧道未通
+  return status === 200 || status === 401;
 }
 
 export const defaultTunnelDeps: TunnelDeps = {
@@ -207,6 +221,7 @@ export const defaultTunnelDeps: TunnelDeps = {
   homeDir: () => homedir(),
   platform: () => process.platform,
   probe: defaultProbe,
+  probeHttp: defaultProbeHttp,
 };
 
 export type JobKind =
@@ -215,7 +230,8 @@ export type JobKind =
   | "create"
   | "route"
   | "config"
-  | "service";
+  | "service"
+  | "auto";
 
 export type Job = {
   id: number;
@@ -230,11 +246,23 @@ export type Job = {
 export type TunnelStatus = {
   installed: { ok: boolean; version: string | null };
   authorized: boolean;
-  tunnel: { ok: boolean; id: string | null };
+  tunnel: {
+    ok: boolean;
+    id: string | null;
+    name: string;
+    existsRemote: boolean;
+    hasCredentials: boolean;
+  };
   dns: { state: DnsState | "unknown"; detail: string };
   config: { ok: boolean; detail: string };
   running: { ok: boolean; detail: string };
   service: { state: "running" | "stopped" | "absent" | "unknown"; detail: string };
+  e2e: {
+    ok: boolean;
+    httpStatus: number | null;
+    detail: string;
+    needsDnsOverwrite: boolean;
+  };
 };
 
 const OUTPUT_TAIL = 4000;
@@ -252,11 +280,16 @@ export class TunnelWizard {
   }
 
 
-  private readTunnelFile(): { hostname?: string; routedHostname?: string } {
+  private readTunnelFile(): {
+    hostname?: string;
+    routedHostname?: string;
+    routedTunnelId?: string;
+  } {
     try {
       return JSON.parse(readFileSync(TUNNEL_FILE, "utf8")) as {
         hostname?: string;
         routedHostname?: string;
+        routedTunnelId?: string;
       };
     } catch {
       return {};
@@ -279,13 +312,14 @@ export class TunnelWizard {
     );
   }
 
-  private markRouted(hostname: string): void {
+  private markRouted(hostname: string, tunnelId?: string | null): void {
     const prev = this.readTunnelFile();
     const norm = hostname.trim().toLowerCase();
-    if (prev.routedHostname === norm) return;
+    const nextTunnelId = tunnelId ?? prev.routedTunnelId;
+    if (prev.routedHostname === norm && prev.routedTunnelId === nextTunnelId) return;
     atomicWriteFileSync(
       TUNNEL_FILE,
-      `${JSON.stringify({ ...prev, hostname: prev.hostname ?? norm, routedHostname: norm }, null, 2)}\n`,
+      `${JSON.stringify({ ...prev, hostname: prev.hostname ?? norm, routedHostname: norm, routedTunnelId: nextTunnelId }, null, 2)}\n`,
     );
   }
 
@@ -298,23 +332,27 @@ export class TunnelWizard {
     return { ok: version !== null, version };
   }
 
+  tunnelName(hostname = this.savedHostname()): string {
+    return tunnelNameForHostname(hostname);
+  }
+
   detectAuthorized(): boolean {
     return existsSync(join(this.cfDir(), "cert.pem"));
   }
 
-  async detectTunnel(): Promise<TunnelInfo | null> {
+  async detectTunnel(tunnelName = this.tunnelName()): Promise<TunnelInfo | null> {
     const r = await this.deps.exec(
       "cloudflared",
       ["tunnel", "list", "--output", "json"],
       { timeoutMs: 15_000 },
     );
-    const fromList = parseTunnelList(r.out, TUNNEL_NAME);
+    const fromList = parseTunnelList(r.out, tunnelName);
     if (fromList) return fromList;
     // 兜底：凭据 json 文件名即隧道 ID（create 时落盘）
     try {
       for (const name of readdirSync(this.cfDir())) {
         if (/^[0-9a-f-]{36}\.json$/i.test(name)) {
-          return { id: name.replace(/\.json$/i, ""), name: TUNNEL_NAME };
+          return { id: name.replace(/\.json$/i, ""), name: tunnelName };
         }
       }
     } catch {
@@ -325,20 +363,29 @@ export class TunnelWizard {
 
   async checkDns(
     hostname: string,
+    expectedTunnelId?: string | null,
   ): Promise<{ state: DnsState | "unknown"; detail: string }> {
     try {
       const records = await this.deps.resolveDns(hostname);
-      let state = classifyDns(records);
+      let state = classifyDns(records, expectedTunnelId);
       const norm = hostname.trim().toLowerCase();
-      if (state === "occupied" && this.readTunnelFile().routedHostname === norm) {
+      const saved = this.readTunnelFile();
+      const cachedMatch =
+        saved.routedHostname === norm &&
+        (!expectedTunnelId ||
+          !saved.routedTunnelId ||
+          saved.routedTunnelId === expectedTunnelId);
+      if (state === "occupied" && cachedMatch) {
         state = "created";
       }
       const detail =
         state === "created"
-          ? "该子域名已创建（已指向隧道）"
-          : state === "occupied"
-            ? `该子域名已被占用（不是隧道记录：${[...records.cname, ...records.a, ...records.aaaa].join(", ")}）`
-            : "未创建，可用";
+          ? "该子域名已创建（已指向当前隧道）"
+          : state === "mismatch"
+            ? "该子域名指向了其它旧隧道（非本机隧道），请点「覆盖写解析」指向本机隧道"
+            : state === "occupied"
+              ? `该子域名已被占用（不是隧道记录：${[...records.cname, ...records.a, ...records.aaaa].join(", ")}）`
+              : "未创建，可用";
       return { state, detail };
     } catch (err) {
       return {
@@ -409,29 +456,109 @@ export class TunnelWizard {
     };
   }
 
-  async status(hostname: string): Promise<TunnelStatus> {
-    const [installed, tunnel, dns, service] = await Promise.all([
+  async probeE2e(
+    hostname: string,
+    token?: string | null,
+  ): Promise<TunnelStatus["e2e"]> {
+    const httpStatus = this.deps.probeHttp
+      ? await this.deps.probeHttp(hostname, token)
+      : (await this.deps.probe(hostname))
+        ? token
+          ? 200
+          : 401
+        : null;
+    if (httpStatus === 200) {
+      return {
+        ok: true,
+        httpStatus,
+        detail: "公网桥端到端已连通（HTTP 200，令牌校验通过）",
+        needsDnsOverwrite: false,
+      };
+    }
+    if (httpStatus === 401) {
+      return token
+        ? {
+            ok: false,
+            httpStatus,
+            detail: "公网隧道已到达本机，但令牌校验未通过（HTTP 401）",
+            needsDnsOverwrite: false,
+          }
+        : {
+            ok: true,
+            httpStatus,
+            detail: "公网隧道已直达本机（HTTP 401；请先在下方创建并启用桥账号）",
+            needsDnsOverwrite: false,
+          };
+    }
+    if (httpStatus === 530) {
+      return {
+        ok: false,
+        httpStatus,
+        detail: "Cloudflare 返回 HTTP 530：DNS 未指向当前隧道或隧道未连上边缘，请点「覆盖写解析」",
+        needsDnsOverwrite: true,
+      };
+    }
+    if (httpStatus !== null) {
+      return {
+        ok: false,
+        httpStatus,
+        detail: `公网探测返回 HTTP ${httpStatus}（请确认本地服务与隧道运行正常）`,
+        needsDnsOverwrite: false,
+      };
+    }
+    return {
+      ok: false,
+      httpStatus: null,
+      detail: "公网暂不可达（请确认第 6/7 步隧道已启动）",
+      needsDnsOverwrite: false,
+    };
+  }
+
+  async status(hostname: string, activeToken?: string | null): Promise<TunnelStatus> {
+    const tunnelName = this.tunnelName(hostname);
+    const [installed, tunnel, service] = await Promise.all([
       this.detectInstalled(),
-      this.detectTunnel(),
-      this.checkDns(hostname),
+      this.detectTunnel(tunnelName),
       this.detectService(),
     ]);
+    const hasCredentials = tunnel
+      ? existsSync(join(this.cfDir(), `${tunnel.id}.json`))
+      : false;
+    const tunnelReady = tunnel !== null && hasCredentials;
+    const [dns, running, e2e] = await Promise.all([
+      this.checkDns(hostname, tunnel?.id ?? null),
+      this.detectRunning(hostname),
+      this.probeE2e(hostname, activeToken),
+    ]);
     const config = this.checkConfig(hostname, tunnel?.id ?? null);
-    const running = await this.detectRunning(hostname);
-    // Cloudflare 橙云代理会把隧道 CNAME 扁平化为边缘 A/AAAA IP；公网探活已通即证实指向本隧道
-    const resolvedDns =
-      running.ok && dns.state === "occupied"
-        ? (this.markRouted(hostname),
-          { state: "created" as const, detail: "该子域名已创建（隧道已连通）" })
-        : dns;
+    let resolvedDns = dns;
+    if (e2e.httpStatus === 530 && dns.state === "created") {
+      resolvedDns = {
+        state: "mismatch",
+        detail: "公网返回 HTTP 530：DNS 可能仍指向旧隧道，请点「覆盖写解析」",
+      };
+    } else if (
+      (e2e.httpStatus === 200 || e2e.httpStatus === 401 || running.ok) &&
+      dns.state === "occupied"
+    ) {
+      this.markRouted(hostname, tunnel?.id ?? null);
+      resolvedDns = { state: "created", detail: "该子域名已创建（隧道已连通）" };
+    }
     return {
       installed,
       authorized: this.detectAuthorized(),
-      tunnel: { ok: tunnel !== null, id: tunnel?.id ?? null },
+      tunnel: {
+        ok: tunnelReady,
+        id: tunnel?.id ?? null,
+        name: tunnelName,
+        existsRemote: tunnel !== null,
+        hasCredentials,
+      },
       dns: resolvedDns,
       config,
       running,
       service,
+      e2e,
     };
   }
 
@@ -533,67 +660,75 @@ export class TunnelWizard {
     });
   }
 
-  startCreate(): Job {
+  startCreate(hostname = this.savedHostname()): Job {
+    const name = this.tunnelName(hostname);
     return this.startJob("create", async (append) => {
       const r = await this.runToText(
         "cloudflared",
-        ["tunnel", "create", TUNNEL_NAME],
+        ["tunnel", "create", name],
         60_000,
         append,
       );
       if (r.code !== 0) {
         throw new Error(
-          `建隧道失败（退出码 ${r.code ?? "未知"}），可手动运行：cloudflared tunnel create ${TUNNEL_NAME}`,
+          `建隧道失败（退出码 ${r.code ?? "未知"}），可手动运行：cloudflared tunnel create ${name}`,
         );
       }
       const id = extractTunnelId(`${r.out}\n${r.err}`) ??
-        (await this.detectTunnel())?.id ??
+        (await this.detectTunnel(name))?.id ??
         null;
       if (!id) throw new Error("隧道已建但没能捕获到隧道 ID，请刷新页面看状");
-      return `隧道已创建，ID：${id}`;
+      return `隧道 ${name} 已创建，ID：${id}`;
     });
   }
 
-  startRoute(hostname: string): Job {
+  startRoute(hostname: string, overwrite = false): Job {
+    const name = this.tunnelName(hostname);
     return this.startJob("route", async (append) => {
-      const before = await this.checkDns(hostname);
+      const tunnel = await this.detectTunnel(name);
+      const before = await this.checkDns(hostname, tunnel?.id ?? null);
       append(`写解析前检查：${before.detail}\n`);
-      if (before.state === "created") {
-        return "该子域名已创建（已指向隧道），无需重复写解";
+      if (!overwrite && before.state === "created") {
+        return "该子域名已创建（已指向当前隧道），无需重复写解析";
       }
-      if (before.state === "occupied") {
+      if (!overwrite && before.state === "occupied") {
         throw new Error(
           "该子域名已被其它记录占用，不是隧道记录；先到 Cloudflare 后台处理掉那条记录，或换一个子域名",
         );
       }
-      const r = await this.runToText(
-        "cloudflared",
-        ["tunnel", "route", "dns", TUNNEL_NAME, hostname],
-        60_000,
-        append,
-      );
+      const useOverwrite = overwrite || before.state === "mismatch";
+      const args = useOverwrite
+        ? ["tunnel", "route", "dns", "--overwrite-dns", name, hostname]
+        : ["tunnel", "route", "dns", name, hostname];
+      const r = await this.runToText("cloudflared", args, 60_000, append);
       if (r.code !== 0) {
         throw new Error(
-          `写解析失败（退出码 ${r.code ?? "未知"}），可手动运行：cloudflared tunnel route dns ${TUNNEL_NAME} ${hostname}`,
+          `写解析失败（退出码 ${r.code ?? "未知"}），可手动运行：cloudflared ${args.join(" ")}`,
         );
       }
-      this.markRouted(hostname);
-      const after = await this.checkDns(hostname);
+      this.markRouted(hostname, tunnel?.id ?? null);
+      const after = await this.checkDns(hostname, tunnel?.id ?? null);
       append(`写解析后复查：${after.detail}\n`);
       return after.state === "created"
-        ? "子域名解析已创建并指向隧"
-        : "解析命令已执行，DNS 生效可能稍有延迟，稍后刷新页面复";
+        ? "子域名解析已创建并指向当前隧道"
+        : "解析命令已执行，DNS 生效可能稍有延迟，稍后刷新页面复查";
     });
   }
 
   startWriteConfig(hostname: string): Job {
+    const name = this.tunnelName(hostname);
     return this.startJob("config", async (append) => {
-      const tunnel = await this.detectTunnel();
+      const tunnel = await this.detectTunnel(name);
       if (!tunnel) {
-        throw new Error("还没建隧道，先完成「建隧道」再写配");
+        throw new Error(`还没建隧道 ${name}，先完成「建隧道」再写配置`);
       }
       const dir = this.cfDir();
       const credentialsFile = join(dir, `${tunnel.id}.json`);
+      if (!existsSync(credentialsFile)) {
+        throw new Error(
+          `云端存在隧道 ${name}，但本机缺少凭据文件（${tunnel.id}.json）。请回第 3 步换一个新的子域名重新建隧道，或从旧机器拷贝该凭据文件`,
+        );
+      }
       const path = join(dir, "config.yml");
       if (existsSync(path)) {
         copyFileSync(path, `${path}.bak`);
@@ -610,45 +745,159 @@ export class TunnelWizard {
     });
   }
 
+  private async installWindowsServiceInternal(
+    append: (text: string) => void,
+  ): Promise<string> {
+    if (this.deps.platform() !== "win32") {
+      throw new Error(
+        "装服务只支持 Windows；当前平台可手动运行：cloudflared service install",
+      );
+    }
+    if (this.childRunning()) {
+      append("先停止本页托管的 cloudflared 进程，避免与 Windows 服务冲突。\n");
+      this.stopRun();
+    }
+    append("将弹出 Windows 管理员确认框（UAC），请点「是」。\n");
+    const bin = resolveWinBin("cloudflared");
+    const cfg = join(this.cfDir(), "config.yml");
+    const psEsc = (s: string) => s.replace(/'/g, "''");
+    // cloudflared service install 用 LocalSystem 跑服务，默认去 systemprofile 找配置；
+    // 这里顺手把服务 ImagePath 指向当前用户的 config.yml，并安全重启避免 STOP_PENDING 卡死
+    const innerScript = [
+      `& '${psEsc(bin)}' service install`,
+      `if (Test-Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Cloudflared') {`,
+      `  Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Cloudflared' -Name ImagePath -Value ('"' + '${psEsc(bin)}' + '" --config "' + '${psEsc(cfg)}' + '" tunnel run')`,
+      `  Stop-Service Cloudflared -Force -NoWait -ErrorAction SilentlyContinue`,
+      `  Start-Sleep -Seconds 2`,
+      `  $svcPid = (Get-CimInstance Win32_Service -Filter "Name='Cloudflared'" -ErrorAction SilentlyContinue).ProcessId`,
+      `  if ($svcPid -and $svcPid -gt 0) { Stop-Process -Id $svcPid -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1 }`,
+      `  Start-Service Cloudflared`,
+      `}`,
+    ].join("; ");
+    const encoded = Buffer.from(innerScript, "utf16le").toString("base64");
+    const r = await this.runToText(
+      "powershell",
+      [
+        "-NoProfile",
+        "-Command",
+        `Start-Process powershell -ArgumentList '-NoProfile','-EncodedCommand','${encoded}' -Verb RunAs -Wait`,
+      ],
+      180_000,
+      append,
+    );
+    const svc = await this.detectService();
+    append(`服务状态复查：${svc.detail}\n`);
+    if (svc.state === "running" || svc.state === "stopped") {
+      return "Cloudflared 服务已安装（开机自启）";
+    }
+    throw new Error(
+      `装服务未确认成功（命令退出码 ${r.code ?? "未知"}，服务状态：${svc.detail}），可手动在管理员 PowerShell 运行：cloudflared service install`,
+    );
+  }
+
   startServiceInstall(): Job {
-    return this.startJob("service", async (append) => {
-      if (this.deps.platform() !== "win32") {
+    return this.startJob("service", (append) =>
+      this.installWindowsServiceInternal(append),
+    );
+  }
+
+  startAutoSetup(hostname: string, activeToken?: string | null): Job {
+    const name = this.tunnelName(hostname);
+    return this.startJob("auto", async (append) => {
+      if (!this.detectAuthorized()) {
+        throw new Error("尚未完成 Cloudflare 授权，请先完成第 2 步「授权」");
+      }
+      // 1. 检查或创建隧道
+      append(`[1/4] 检查隧道 ${name}...\n`);
+      let tunnel = await this.detectTunnel(name);
+      if (tunnel) {
+        const credPath = join(this.cfDir(), `${tunnel.id}.json`);
+        if (!existsSync(credPath)) {
+          throw new Error(
+            `云端已存在同名隧道 ${name}，但本机缺少凭据文件（${tunnel.id}.json）。请先回第 3 步换一个新的子域名（如加 -pc2）再试`,
+          );
+        }
+        append(`隧道 ${name} 已就绪（ID：${tunnel.id}）\n`);
+      } else {
+        const cr = await this.runToText(
+          "cloudflared",
+          ["tunnel", "create", name],
+          60_000,
+          append,
+        );
+        if (cr.code !== 0) {
+          throw new Error(
+            `建隧道失败（退出码 ${cr.code ?? "未知"}），可手动运行：cloudflared tunnel create ${name}`,
+          );
+        }
+        const id =
+          extractTunnelId(`${cr.out}\n${cr.err}`) ??
+          (await this.detectTunnel(name))?.id ??
+          null;
+        if (!id) throw new Error("隧道已建但未能捕获隧道 ID，请刷新页面查看");
+        tunnel = { id, name };
+        append(`隧道 ${name} 创建完成（ID：${id}）\n`);
+      }
+
+      // 2. 写 DNS 解析（指向当前隧道，不匹配则自动覆盖）
+      append(`[2/4] 检查并写入 DNS 解析 ${hostname}...\n`);
+      const dnsBefore = await this.checkDns(hostname, tunnel.id);
+      if (dnsBefore.state === "occupied") {
         throw new Error(
-          "装服务只支持 Windows；当前平台可手动运行：cloudflared service install",
+          `子域名 ${hostname} 已被非隧道记录占用，请到 Cloudflare 后台清理或换一个子域名`,
         );
       }
-      append("将弹出 Windows 管理员确认框（UAC），请点「是」。\n");
-      const bin = resolveWinBin("cloudflared");
-      const cfg = join(this.cfDir(), "config.yml");
-      const psEsc = (s: string) => s.replace(/'/g, "''");
-      // cloudflared service install 用 LocalSystem 跑服务，默认去 systemprofile 找配置；
-      // 这里顺手把服务 ImagePath 指向当前用户的 config.yml 并重启，避免 1033 空转
-      const innerScript = [
-        `& '${psEsc(bin)}' service install`,
-        `if (Test-Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Cloudflared') {`,
-        `  Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Cloudflared' -Name ImagePath -Value ('"' + '${psEsc(bin)}' + '" --config "' + '${psEsc(cfg)}' + '" tunnel run')`,
-        `  Restart-Service Cloudflared -Force`,
-        `}`,
-      ].join("; ");
-      const encoded = Buffer.from(innerScript, "utf16le").toString("base64");
-      const r = await this.runToText(
-        "powershell",
-        [
-          "-NoProfile",
-          "-Command",
-          `Start-Process powershell -ArgumentList '-NoProfile','-EncodedCommand','${encoded}' -Verb RunAs -Wait`,
-        ],
-        180_000,
-        append,
-      );
-      const svc = await this.detectService();
-      append(`服务状态复查：${svc.detail}\n`);
-      if (svc.state === "running" || svc.state === "stopped") {
-        return "Cloudflared 服务已安装（开机自启）";
+      if (dnsBefore.state !== "created") {
+        const args = [
+          "tunnel",
+          "route",
+          "dns",
+          "--overwrite-dns",
+          name,
+          hostname,
+        ];
+        const rr = await this.runToText("cloudflared", args, 60_000, append);
+        if (rr.code !== 0) {
+          throw new Error(
+            `写解析失败（退出码 ${rr.code ?? "未知"}），可手动运行：cloudflared ${args.join(" ")}`,
+          );
+        }
+        this.markRouted(hostname, tunnel.id);
+      } else {
+        append("DNS 解析已指向当前隧道，跳过\n");
       }
-      throw new Error(
-        `装服务未确认成功（命令退出码 ${r.code ?? "未知"}，服务状态：${svc.detail}），可手动在管理员 PowerShell 运行：cloudflared service install`,
-      );
+
+      // 3. 写入 config.yml
+      append("[3/4] 写入 config.yml...\n");
+      const dir = this.cfDir();
+      const credentialsFile = join(dir, `${tunnel.id}.json`);
+      const cfgPath = join(dir, "config.yml");
+      if (existsSync(cfgPath)) {
+        copyFileSync(cfgPath, `${cfgPath}.bak`);
+      }
+      const yml = buildConfigYml({
+        tunnelId: tunnel.id,
+        hostname,
+        credentialsFile,
+      });
+      atomicWriteFileSync(cfgPath, yml);
+      append(`已写入 ${cfgPath}\n`);
+
+      // 4. 启动隧道（Windows 优先装服务，非 Windows 或已运行则跳过）
+      append("[4/4] 启动隧道并做端到端公网体检...\n");
+      if (this.deps.platform() === "win32") {
+        await this.installWindowsServiceInternal(append);
+      } else if (!this.childRunning()) {
+        this.startRun(hostname);
+      }
+
+      await new Promise((res) => setTimeout(res, 3_000));
+      const e2e = await this.probeE2e(hostname, activeToken);
+      append(`公网体检结果：${e2e.detail}\n`);
+      if (e2e.ok) {
+        return `一键配置全部完成：${e2e.detail}`;
+      }
+      return `配置已写入并启动服务；公网体检提示：${e2e.detail}（DNS 生效可能需要等待 5–10 秒后刷新）`;
     });
   }
 
@@ -657,11 +906,12 @@ export class TunnelWizard {
     return this.childLog.slice(-lines);
   }
 
-  startRun(): string {
+  startRun(hostname = this.savedHostname()): string {
     if (this.childRunning()) return "隧道已在由本页托管运行中";
+    const name = this.tunnelName(hostname);
     let child: ChildProcess;
     try {
-      child = spawn(resolveWinBin("cloudflared"), ["tunnel", "run", TUNNEL_NAME], {
+      child = spawn(resolveWinBin("cloudflared"), ["tunnel", "run", name], {
         windowsHide: true,
       });
     } catch (err) {
