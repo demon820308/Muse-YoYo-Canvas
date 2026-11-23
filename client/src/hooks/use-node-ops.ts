@@ -357,9 +357,63 @@ const insertAsset = useCallback(
   [addNodeAt, applyNodes, buildNode, flashNode, persistAddedNode, showToast, updateSelectedIds],
 );
 
+const CARD_CHROME_W = 14;
+const CARD_CHROME_H = 33;
+
+function cardSizeForRatio(
+  ratio: string | null | undefined,
+  kind: "image" | "video",
+): { width: number; height: number } | null {
+  if (!ratio) return null;
+  const m = /^(\d+(?:\.\d+)?)\s*[:xX/]\s*(\d+(?:\.\d+)?)$/.exec(ratio.trim());
+  if (!m) return null;
+  const rw = Number(m[1]);
+  const rh = Number(m[2]);
+  if (!Number.isFinite(rw) || !Number.isFinite(rh) || rw <= 0 || rh <= 0) {
+    return null;
+  }
+  const base = kind === "video" ? 420 : 320;
+  if (rw >= rh) {
+    return {
+      width: base,
+      height: Math.max(
+        120,
+        Math.round(CARD_CHROME_H + ((base - CARD_CHROME_W) * rh) / rw),
+      ),
+    };
+  }
+  return {
+    width: Math.max(
+      140,
+      Math.round(CARD_CHROME_W + ((base - CARD_CHROME_H) * rw) / rh),
+    ),
+    height: base,
+  };
+}
+
 const updateNode = useCallback(
   (id: string, patch: Partial<CanvasNode>) => {
-    applyNodes(nodesRef.current.map((n) => (n.id === id ? { ...n, ...patch } : n)));
+    applyNodes(
+      nodesRef.current.map((n) => {
+        if (n.id !== id) return n;
+        const next = { ...n, ...patch };
+        if (
+          patch.genRatio !== undefined &&
+          patch.width === undefined &&
+          patch.height === undefined &&
+          !next.mediaUrl &&
+          !next.freeResize &&
+          (next.type === "image" || next.type === "video")
+        ) {
+          const sized = cardSizeForRatio(patch.genRatio, next.type);
+          if (sized) {
+            next.width = sized.width;
+            next.height = sized.height;
+          }
+        }
+        return next;
+      }),
+    );
   },
   [applyNodes],
 );

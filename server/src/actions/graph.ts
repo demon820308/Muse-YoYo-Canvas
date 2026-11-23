@@ -15,7 +15,12 @@ import {
   repairNodeMediaPointers,
   type ServerMediaRestore,
 } from "./graph-helpers";
-import { normalizeImageRatio, parseGenSize } from "./ratios";
+import {
+  frameFitsMeasuredSize,
+  measuredCardSize,
+  normalizeImageRatio,
+  parseGenSize,
+} from "./ratios";
 import { assignNodeSeqs } from "./project-dirs";
 
 export const GraphActions = {
@@ -43,9 +48,16 @@ export const GraphActions = {
       const db = ctx.db<typeof schema>();
       const now = new Date();
       const existing = await db
-        .select({ id: schema.canvasNodes.id, seq: schema.canvasNodes.seq })
+        .select({
+          id: schema.canvasNodes.id,
+          seq: schema.canvasNodes.seq,
+          genStatus: schema.canvasNodes.genStatus,
+          genSize: schema.canvasNodes.genSize,
+          mediaBlobKey: schema.canvasNodes.mediaBlobKey,
+        })
         .from(schema.canvasNodes)
         .where(eq(schema.canvasNodes.projectId, args.projectId));
+      const existingById = new Map(existing.map((r) => [r.id, r]));
       if (
         args.nodes.length === 0 &&
         existing.length > 0 &&
@@ -98,6 +110,24 @@ export const GraphActions = {
           .where(eq(schema.projects.id, args.projectId)),
       ];
       args.nodes.forEach((n, index) => {
+        const prev = existingById.get(n.id);
+        let saveWidth = n.width;
+        let saveHeight = n.height;
+        if (
+          prev &&
+          prev.genStatus === "done" &&
+          prev.mediaBlobKey &&
+          prev.genSize &&
+          !n.freeResize &&
+          (n.type === "image" || n.type === "video") &&
+          !frameFitsMeasuredSize(n.width, n.height, prev.genSize)
+        ) {
+          const fitted = measuredCardSize(prev.genSize, n.type);
+          if (fitted) {
+            saveWidth = fitted.w;
+            saveHeight = fitted.h;
+          }
+        }
         const restore = restoreById.get(n.id);
         const restoreKind =
           restore &&
@@ -118,8 +148,8 @@ export const GraphActions = {
               title: n.title,
               x: n.x,
               y: n.y,
-              width: n.width,
-              height: n.height,
+              width: saveWidth,
+              height: saveHeight,
               content: n.content,
               prompt: n.prompt,
               status: n.status,
@@ -155,8 +185,8 @@ export const GraphActions = {
                 title: n.title,
                 x: n.x,
                 y: n.y,
-                width: n.width,
-                height: n.height,
+                width: saveWidth,
+                height: saveHeight,
                 content: n.content,
                 prompt: n.prompt,
                 status: n.status,
