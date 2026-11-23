@@ -15,6 +15,20 @@
       "when": 1795306561604,
       "tag": "0002_bridge_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1795433412493,
+      "tag": "0003_add_pairing_slots",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1795436610865,
+      "tag": "0004_add_pairing_label",
+      "breakpoints": true
     }
   ]
 }

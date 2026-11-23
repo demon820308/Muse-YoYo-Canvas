@@ -3,6 +3,9 @@
 // 全量轮次的对账：本地待处理列表里已经消失的 queued 行（用户在
 // 本地停止/取消、桥还没领取派发）结算为 failed，随后走正常 fail
 // 回送路径收尾，不再永久冻结在待处理。
+// 两个配对槽位互不干扰：对账只结算本槽位的 queued 行（拿本槽位
+// 本轮的 pending 列表比），跟进只处理本槽位的在途行、用本槽位
+// 的 transport 回送；错误写回本槽位的 config 行。
 // 状态机转换一律经 bridge-store 的守卫转换，本文件不直写 status。
 
 import type { Ctx } from "@hatch/space-sdk";
@@ -16,6 +19,7 @@ transitionBridgeJob,
 updateBridgeConfig,
 type BridgeJobRow,
 type Db,
+type PairingSlot,
 } from "./bridge-store";
 import {
 BridgeUnreachableError,
@@ -188,20 +192,24 @@ export const ORPHANED_QUEUED_ERROR =
 
 const MAX_RECONCILE_PER_ROUND = 10;
 
-/** Settles queued rows the local side no longer offers. The caller
- * passes the jobId set from THIS round's successful /bridge/pending
- * fetch — reconciliation never runs on a stale or failed fetch, so
- * absence here means the local side has dropped the job (stopped or
- * cancelled before the bridge claimed it). Settled rows land in
- * `failed` with the reason on the row; the round's follow-up phase
- * then delivers that failure through the normal fail path and the
- * row walks on to cleaned, exactly like any other failed job. */
+/** Settles queued rows one slot's local side no longer offers. The
+ * caller passes the jobId set from THIS slot's successful
+ * /bridge/pending fetch this round — reconciliation never runs on
+ * a stale or failed fetch, so absence here means that slot's local
+ * side has dropped the job (stopped or cancelled before the bridge
+ * claimed it). Only rows owned by `slot` are considered: the other
+ * slot's pending list can never settle this slot's rows, and vice
+ * versa. Settled rows land in `failed` with the reason on the row;
+ * the round's follow-up phase then delivers that failure through
+ * the normal fail path and the row walks on to cleaned, exactly
+ * like any other failed job. */
 export async function reconcileOrphanedQueued(
   db: Db,
+  slot: PairingSlot,
   pendingJobIds: ReadonlySet<string>,
   now: number = Date.now(),
 ): Promise<void> {
-  const queued = await listBridgeJobsByStatus(db, ["queued"]);
+  const queued = await listBridgeJobsByStatus(db, ["queued"], undefined, slot);
   let settled = 0;
   for (const row of queued) {
     if (settled >= MAX_RECONCILE_PER_ROUND) break;
@@ -217,13 +225,17 @@ export async function reconcileOrphanedQueued(
   }
 }
 
-/** In-flight follow-up shared by both sync modes. An unreachable
- * local side stops the round's remaining deliveries (rows keep
- * their state for the next round) and flags the round aborted;
- * any other per-row failure is recorded and the round moves on. */
+/** In-flight follow-up for ONE slot, shared by both sync modes:
+ * only that slot's rows are followed up, through that slot's
+ * transport, and errors land on that slot's config row. An
+ * unreachable local side stops this slot's remaining deliveries
+ * (rows keep their state for the next round) and flags the slot
+ * aborted; the other slot's round is unaffected. Any other
+ * per-row failure is recorded and the round moves on. */
 export async function followUpInFlight(
   ctx: Ctx,
   db: Db,
+  slot: PairingSlot,
   transport: BridgeTransport,
   counts: SyncCounts,
 ): Promise<{ aborted: boolean }> {
@@ -231,12 +243,13 @@ export async function followUpInFlight(
     db,
     ["working", "done", "failed"],
     MAX_FOLLOW_UP_PER_ROUND,
+    slot,
   );
   for (const row of rows) {
     try {
       await followUpRow(ctx, db, transport, row, counts);
     } catch (err) {
-      await updateBridgeConfig(db, {
+      await updateBridgeConfig(db, slot, {
         lastError: errMsg(err),
         lastErrorAt: Date.now(),
       });

@@ -1,8 +1,13 @@
 // actions.ts — YoYo桥的全部动作：
-//   bridgeSync / bridgeFastSync — 同步编排（全量轮拉新 + 对账
-//     本地已取消的 queued 孤儿行 + 两轮都跑在途跟进）；未配置时
-//     空转回 skipped，不发请求不抛错。
-//   bridgeSetConfig / bridgeStatus — 配对设置面（令牌只以掩码出现）。
+//   bridgeSync / bridgeFastSync — 同步编排：对两个配对槽位各跑
+//     一轮（全量轮拉新 + 对账本槽位本地已取消的 queued 孤儿行 +
+//     两轮都跑本槽位在途跟进）；槽位未配置则跳过该槽位，两槽位
+//     都未配置时整轮空转回 skipped，不发请求不抛错。一槽位不可达
+//     只记到该槽位自己的 config 行，绝不中断另一槽位。
+//   bridgeSetConfig / bridgeStatus — 配对设置面（按 slot 作用，
+//     令牌只以掩码出现）。
+//   bridgeMovePairing — 运维动作：把一个槽位的配对整体迁移到另一
+//     个槽位（服务端内部原样复制，令牌只回掩码），可同时清开源槽位。
 //   bridgeClearFailed — 清除失败记录（failed 行 + 已清理但带失败
 //     原因的行），连带删作业目录；成功与在途记录不动。
 //   completeBridgeJob / failBridgeJob — 后台生成任务的交付回调。
@@ -12,20 +17,25 @@ import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk"
 import { Contracts } from "@space/privileged";
 import * as schema from "./schema";
 import {
+PAIRING_SLOTS,
 acquireSyncLease,
 countBridgeJobsByStatus,
 countClearableFailedJobs,
 deleteBridgeJobsByIds,
+effectivePairingId,
 getBridgeConfig,
 getBridgeJob,
 insertBridgeJob,
 listClearableFailedJobs,
 listRecentBridgeJobs,
 maskBridgeToken,
+pairingIdForSlot,
 releaseSyncLease,
+slotOfPairingId,
 transitionBridgeJob,
 updateBridgeConfig,
 type Db,
+type PairingSlot,
 } from "./bridge-store";
 import {
 BridgeAuthError,
@@ -79,12 +89,13 @@ const ALL_PRIVILEGED = [
 ];
 
 // ---------------------------------------------------------------------------
-// Claim phase (full rounds only)
+// Claim phase (full rounds only), scoped to one slot
 // ---------------------------------------------------------------------------
 
 async function claimAndDispatch(
   ctx: Ctx,
   db: Db,
+  slot: PairingSlot,
   transport: BridgeTransport,
   pending: BridgePendingJob[],
   counts: SyncCounts,
@@ -94,6 +105,12 @@ async function claimAndDispatch(
     if (handled >= MAX_CLAIMS_PER_ROUND) break;
     const existing = await getBridgeJob(db, job.jobId);
     if (existing && existing.status !== "queued") continue;
+    // A jobId already claimed by the other slot is never re-claimed
+    // here: jobIds are unique to one local side, and re-stamping
+    // would corrupt the other slot's bookkeeping.
+    if (existing && effectivePairingId(existing) !== pairingIdForSlot(slot)) {
+      continue;
+    }
     handled += 1;
     if (!existing) {
       const inserted = await insertBridgeJob(db, {
@@ -101,6 +118,7 @@ async function claimAndDispatch(
         kind: job.kind,
         localProjectId: job.projectId,
         localNodeId: job.nodeId,
+        pairingId: pairingIdForSlot(slot),
         payload: JSON.stringify(job.payload ?? {}),
       });
       if (inserted) counts.claimed += 1;
@@ -120,8 +138,9 @@ async function claimAndDispatch(
             error: err.message,
           });
         } else {
-          // Retryable: the row stays queued, config records why.
-          await updateBridgeConfig(db, {
+          // Retryable: the row stays queued, this slot's config
+          // records why.
+          await updateBridgeConfig(db, slot, {
             lastError: errMsg(err),
             lastErrorAt: Date.now(),
           });
@@ -147,7 +166,7 @@ async function claimAndDispatch(
       await transport.ackClaim(job.jobId);
     } catch (err) {
       // Not claimed on the local side: no dispatch, row stays queued.
-      await updateBridgeConfig(db, {
+      await updateBridgeConfig(db, slot, {
         lastError: errMsg(err),
         lastErrorAt: Date.now(),
       });
@@ -164,20 +183,30 @@ async function claimAndDispatch(
 }
 
 // ---------------------------------------------------------------------------
-// Sync round
+// Sync rounds: one round per configured slot, slots fully isolated
 // ---------------------------------------------------------------------------
 
-async function runSyncRound(ctx: Ctx, mode: "full" | "fast"): Promise<SyncResult> {
-  const db = ctx.db<typeof schema>();
-  const counts = zeroCounts();
-  const config = await getBridgeConfig(db);
-  if (!config.baseUrl || !config.token) {
-    return { status: "skipped", reason: "not_configured", ...counts };
-  }
+type SlotRoundOutcome =
+  | "not_configured"
+  | "lease_held"
+  | "unreachable"
+  | "auth_failed"
+  | "ok";
+
+/** Runs one slot's sync round under that slot's own lease, with a
+ * transport built from that slot's own baseUrl/token. Every error
+ * and online timestamp lands on that slot's config row only. */
+async function runSlotRound(
+  ctx: Ctx,
+  db: Db,
+  slot: PairingSlot,
+  mode: "full" | "fast",
+  counts: SyncCounts,
+): Promise<SlotRoundOutcome> {
+  const config = await getBridgeConfig(db, slot);
+  if (!config.baseUrl || !config.token) return "not_configured";
   const owner = crypto.randomUUID();
-  if (!(await acquireSyncLease(db, owner))) {
-    return { status: "skipped", reason: "lease_held", ...counts };
-  }
+  if (!(await acquireSyncLease(db, slot, owner))) return "lease_held";
   try {
     const transport = createBridgeTransport({
       baseUrl: config.baseUrl,
@@ -188,40 +217,63 @@ async function runSyncRound(ctx: Ctx, mode: "full" | "fast"): Promise<SyncResult
       try {
         pending = await transport.getPending();
       } catch (err) {
-        await updateBridgeConfig(db, {
+        await updateBridgeConfig(db, slot, {
           lastError: errMsg(err),
           lastErrorAt: Date.now(),
         });
-        return {
-          status: "skipped",
-          reason: err instanceof BridgeAuthError ? "auth_failed" : "local_unreachable",
-          ...counts,
-        };
+        return err instanceof BridgeAuthError ? "auth_failed" : "unreachable";
       }
-      await updateBridgeConfig(db, {
+      await updateBridgeConfig(db, slot, {
         lastOnlineAt: Date.now(),
         lastError: null,
         lastErrorAt: null,
       });
-      await claimAndDispatch(ctx, db, transport, pending, counts);
-      // Reconcile against this round's fresh pending list: queued
-      // rows the local side no longer offers were stopped/cancelled
-      // locally before dispatch — settle them instead of leaving
-      // them frozen in 待处理 forever.
+      await claimAndDispatch(ctx, db, slot, transport, pending, counts);
+      // Reconcile against this slot's fresh pending list only:
+      // queued rows of THIS slot that its local side no longer
+      // offers were stopped/cancelled locally before dispatch —
+      // settle them instead of leaving them frozen in 待处理
+      // forever. The other slot's rows are never touched here.
       await reconcileOrphanedQueued(
         db,
+        slot,
         new Set(pending.map((job) => job.jobId)),
       );
     }
-    const follow = await followUpInFlight(ctx, db, transport, counts);
-    if (follow.aborted) {
-      return { status: "skipped", reason: "local_unreachable", ...counts };
-    }
+    const follow = await followUpInFlight(ctx, db, slot, transport, counts);
+    if (follow.aborted) return "unreachable";
+    return "ok";
+  } finally {
+    await releaseSyncLease(db, slot, owner);
+  }
+}
+
+/** Runs every configured slot's round and folds the outcomes into
+ * the single sync result the schedulers have always consumed. Both
+ * slots unconfigured keeps the original skipped/not_configured
+ * semantics; one healthy slot makes the round ok even when the
+ * other slot is unreachable or its lease is held elsewhere. */
+async function runSyncRound(ctx: Ctx, mode: "full" | "fast"): Promise<SyncResult> {
+  const db = ctx.db<typeof schema>();
+  const counts = zeroCounts();
+  const outcomes: SlotRoundOutcome[] = [];
+  for (const slot of PAIRING_SLOTS) {
+    outcomes.push(await runSlotRound(ctx, db, slot, mode, counts));
+  }
+  if (outcomes.every((o) => o === "not_configured")) {
+    return { status: "skipped", reason: "not_configured", ...counts };
+  }
+  if (outcomes.includes("ok")) {
     ctx.invalidateQueries();
     return { status: "ok", reason: null, ...counts };
-  } finally {
-    await releaseSyncLease(db, owner);
   }
+  if (outcomes.includes("auth_failed")) {
+    return { status: "skipped", reason: "auth_failed", ...counts };
+  }
+  if (outcomes.includes("unreachable")) {
+    return { status: "skipped", reason: "local_unreachable", ...counts };
+  }
+  return { status: "skipped", reason: "lease_held", ...counts };
 }
 
 // ---------------------------------------------------------------------------
@@ -368,10 +420,42 @@ async function clearFailedRecords(ctx: Ctx): Promise<ClearFailedResult> {
 // Actions
 // ---------------------------------------------------------------------------
 
+const slotArg = z
+  .number()
+  .int()
+  .min(1)
+  .max(2)
+  .optional()
+  .describe("Pairing slot: 1 or 2 (defaults to 1)");
+
+function toSlot(value: number | undefined): PairingSlot {
+  return value === 2 ? 2 : 1;
+}
+
+const pairingStatus = z.object({
+  slot: z.number(),
+  label: z.string(),
+  configured: z.boolean(),
+  baseUrl: z.string(),
+  tokenMasked: z.string(),
+  lastOnlineAt: z.string().nullable(),
+  lastError: z.string().nullable(),
+  lastErrorAt: z.string().nullable(),
+  leaseHeld: z.boolean(),
+});
+
+const pairingSummary = z.object({
+  slot: z.number(),
+  label: z.string(),
+  configured: z.boolean(),
+  baseUrl: z.string(),
+  tokenMasked: z.string(),
+});
+
 export const Actions = {
   bridgeSync: defineAction({
     description:
-      "Full bridge sync round: pulls queued generation jobs from the paired local canvas through its tunnel, executes them in this space (direct generation, inference, or spawned tasks), delivers results back, and reconciles queued jobs the local side no longer offers (stopped/cancelled locally before dispatch) by settling them as failed so they never freeze in pending. Skips harmlessly when the bridge is not configured.",
+      "Full bridge sync round: for each configured pairing slot (1 and 2), pulls queued generation jobs from that slot's paired local canvas through its tunnel, executes them in this space (direct generation, inference, or spawned tasks), delivers results back through the same slot, and reconciles that slot's queued jobs its local side no longer offers (stopped/cancelled locally before dispatch) by settling them as failed so they never freeze in pending. Unconfigured slots are skipped; a slot that is unreachable only records its own error and never blocks the other slot. Skips harmlessly when no slot is configured.",
     request: z.object({}),
     response: syncResponse,
     privileged: ALL_PRIVILEGED,
@@ -380,7 +464,7 @@ export const Actions = {
 
   bridgeFastSync: defineAction({
     description:
-      "Fast bridge sync round: follows up in-flight bridge jobs only (delivers finished results, re-sends failures, cleans up); never pulls new jobs. Skips harmlessly when the bridge is not configured.",
+      "Fast bridge sync round: follows up in-flight bridge jobs only, grouped by their pairing slot and delivered through each slot's own tunnel (delivers finished results, re-sends failures, cleans up); never pulls new jobs. Skips harmlessly when no slot is configured.",
     request: z.object({}),
     response: syncResponse,
     privileged: ALL_PRIVILEGED,
@@ -389,23 +473,53 @@ export const Actions = {
 
   bridgeSetConfig: defineAction({
     description:
-      "Saves the bridge pairing config (local canvas tunnel base URL and bridge token). The token is only ever returned masked. clear=true wipes the pairing back to unconfigured.",
+      "Saves one pairing slot's config (slot 1 or 2, default 1): the local canvas tunnel base URL and bridge token for that slot only. The token is only ever returned masked. Optional label renames that slot only (trimmed, max 30 chars; empty string clears the custom name back to the default); omitting label leaves the existing name untouched, and a label-only call (label given, baseUrl empty) renames without requiring the slot to be paired. clear=true wipes that slot's pairing and its name back to a fresh unconfigured state and leaves the other slot untouched.",
     request: z.object({
       baseUrl: z.string().max(300),
       token: z.string().max(300).optional(),
+      label: z.string().max(30).optional(),
       clear: z.boolean().optional(),
+      slot: slotArg,
     }),
     response: z.object({
       configured: z.boolean(),
       baseUrl: z.string(),
       tokenMasked: z.string(),
+      slot: z.number(),
+      label: z.string(),
     }),
     handler: async (ctx, args) => {
       const db = ctx.db<typeof schema>();
+      const slot = toSlot(args.slot);
       if (args.clear) {
-        await updateBridgeConfig(db, { baseUrl: "", token: "" });
+        await updateBridgeConfig(db, slot, {
+          baseUrl: "",
+          token: "",
+          label: "",
+        });
         ctx.invalidateQueries();
-        return { configured: false, baseUrl: "", tokenMasked: "" };
+        return {
+          configured: false,
+          baseUrl: "",
+          tokenMasked: "",
+          slot,
+          label: "",
+        };
+      }
+      // 只改名：传了 label 且没给地址时只更新名称，不要求该槽位
+      // 已配对；名称去首尾空白后保存，空字符串即恢复缺省名。
+      if (args.label !== undefined && !args.baseUrl.trim()) {
+        const config = await updateBridgeConfig(db, slot, {
+          label: args.label.trim(),
+        });
+        ctx.invalidateQueries();
+        return {
+          configured: Boolean(config.baseUrl && config.token),
+          baseUrl: config.baseUrl,
+          tokenMasked: maskBridgeToken(config.token),
+          slot,
+          label: config.label,
+        };
       }
       const baseUrl = normalizeBridgeBaseUrl(args.baseUrl);
       let parsed: URL | null = null;
@@ -417,23 +531,105 @@ export const Actions = {
       if (!parsed || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
         throw new Error("桥地址无效：请填写本地画布的隧道地址（http/https）");
       }
-      const existing = await getBridgeConfig(db);
+      const existing = await getBridgeConfig(db, slot);
       const token =
         args.token && args.token.trim() ? args.token : existing.token;
       if (!token) throw new Error("请填写桥令牌");
-      const config = await updateBridgeConfig(db, { baseUrl, token });
+      const config = await updateBridgeConfig(db, slot, {
+        baseUrl,
+        token,
+        ...(args.label !== undefined ? { label: args.label.trim() } : {}),
+      });
       ctx.invalidateQueries();
       return {
         configured: true,
         baseUrl: config.baseUrl,
         tokenMasked: maskBridgeToken(config.token),
+        slot,
+        label: config.label,
       };
+    },
+  }),
+
+  bridgeMovePairing: defineAction({
+    description:
+      "Moves one pairing slot's pairing (tunnel base URL, bridge token, and custom name label) wholesale to the other slot, entirely server-side: the token is copied verbatim inside the server and only ever returned masked. The target slot's online/error state and sync lease are reset so it restarts as the new pairing; with clearFrom (default true) the source slot is wiped back to unconfigured, name included. Job records and their pairing ownership are never touched. Rejects when the source slot is not configured or both slots are the same.",
+    request: z.object({
+      fromSlot: z
+        .number()
+        .int()
+        .min(1)
+        .max(2)
+        .describe("Source pairing slot: 1 or 2"),
+      toSlot: z
+        .number()
+        .int()
+        .min(1)
+        .max(2)
+        .describe("Target pairing slot: 1 or 2, must differ from fromSlot"),
+      clearFrom: z
+        .boolean()
+        .optional()
+        .describe("Wipe the source slot after the move (default true)"),
+    }),
+    response: z.object({
+      from: pairingSummary,
+      to: pairingSummary,
+    }),
+    handler: async (ctx, args) => {
+      const db = ctx.db<typeof schema>();
+      const from = toSlot(args.fromSlot);
+      const to = toSlot(args.toSlot);
+      if (from === to) {
+        throw new Error("源槽位与目标槽位不能相同");
+      }
+      const source = await getBridgeConfig(db, from);
+      if (!source.baseUrl || !source.token) {
+        throw new Error(`配对 ${from} 未配对，无法迁移`);
+      }
+      const clearFrom = args.clearFrom ?? true;
+      // Copy verbatim into the target; its online/error/lease state
+      // resets so the target restarts under the moved pairing.
+      await updateBridgeConfig(db, to, {
+        baseUrl: source.baseUrl,
+        token: source.token,
+        label: source.label,
+        lastOnlineAt: null,
+        lastError: null,
+        lastErrorAt: null,
+        syncLeaseUntil: null,
+        syncLeaseOwner: null,
+      });
+      if (clearFrom) {
+        await updateBridgeConfig(db, from, {
+          baseUrl: "",
+          token: "",
+          label: "",
+          lastOnlineAt: null,
+          lastError: null,
+          lastErrorAt: null,
+          syncLeaseUntil: null,
+          syncLeaseOwner: null,
+        });
+      }
+      ctx.invalidateQueries();
+      const summarize = async (slot: PairingSlot) => {
+        const config = await getBridgeConfig(db, slot);
+        return {
+          slot,
+          label: config.label,
+          configured: Boolean(config.baseUrl && config.token),
+          baseUrl: config.baseUrl,
+          tokenMasked: maskBridgeToken(config.token),
+        };
+      };
+      return { from: await summarize(from), to: await summarize(to) };
     },
   }),
 
   bridgeStatus: defineAction({
     description:
-      "Reports the bridge pairing state: configured flag, tunnel base URL, masked token, job counts by state (including how many failed records can be cleared), last online/error, whether a sync lease is currently held, and the 10 most recent jobs.",
+      "Reports the bridge pairing state for both slots: a pairings array with each slot's custom name label (raw stored value, empty when never renamed), configured flag, tunnel base URL, masked token, last online/error and lease state; the top-level fields mirror slot 1 for compatibility; plus global job counts by state (including how many failed records can be cleared) and the 10 most recent jobs, each tagged with its pairing slot.",
     request: z.object({}),
     response: z.object({
       configured: z.boolean(),
@@ -448,6 +644,7 @@ export const Actions = {
       lastError: z.string().nullable(),
       lastErrorAt: z.string().nullable(),
       leaseHeld: z.boolean(),
+      pairings: z.array(pairingStatus),
       recentJobs: z.array(
         z.object({
           jobId: z.string(),
@@ -455,6 +652,7 @@ export const Actions = {
           status: z.string(),
           error: z.string().nullable(),
           genSize: z.string().nullable(),
+          pairing: z.number(),
           createdAt: z.string(),
           updatedAt: z.string(),
         }),
@@ -462,7 +660,26 @@ export const Actions = {
     }),
     async handler(ctx) {
       const db = ctx.db<typeof schema>();
-      const config = await getBridgeConfig(db);
+      const iso = (ms: number | null) =>
+        ms != null ? new Date(ms).toISOString() : null;
+      const now = Date.now();
+      const pairings = await Promise.all(
+        PAIRING_SLOTS.map(async (slot) => {
+          const config = await getBridgeConfig(db, slot);
+          return {
+            slot,
+            label: config.label,
+            configured: Boolean(config.baseUrl && config.token),
+            baseUrl: config.baseUrl,
+            tokenMasked: maskBridgeToken(config.token),
+            lastOnlineAt: iso(config.lastOnlineAt),
+            lastError: config.lastError,
+            lastErrorAt: iso(config.lastErrorAt),
+            leaseHeld:
+              config.syncLeaseUntil != null && config.syncLeaseUntil > now,
+          };
+        }),
+      );
       const [queued, working, done, failed, cleaned, clearableFailed, recent] =
         await Promise.all([
           countBridgeJobsByStatus(db, "queued"),
@@ -473,28 +690,28 @@ export const Actions = {
           countClearableFailedJobs(db),
           listRecentBridgeJobs(db, 10),
         ]);
-      const iso = (ms: number | null) =>
-        ms != null ? new Date(ms).toISOString() : null;
+      const first = pairings[0];
       return {
-        configured: Boolean(config.baseUrl && config.token),
-        baseUrl: config.baseUrl,
-        tokenMasked: maskBridgeToken(config.token),
+        configured: first?.configured ?? false,
+        baseUrl: first?.baseUrl ?? "",
+        tokenMasked: first?.tokenMasked ?? "",
         pending: queued,
         inFlight: working + done,
         failed,
         cleaned,
         clearableFailed,
-        lastOnlineAt: iso(config.lastOnlineAt),
-        lastError: config.lastError,
-        lastErrorAt: iso(config.lastErrorAt),
-        leaseHeld:
-          config.syncLeaseUntil != null && config.syncLeaseUntil > Date.now(),
+        lastOnlineAt: first?.lastOnlineAt ?? null,
+        lastError: first?.lastError ?? null,
+        lastErrorAt: first?.lastErrorAt ?? null,
+        leaseHeld: first?.leaseHeld ?? false,
+        pairings,
         recentJobs: recent.map((row) => ({
           jobId: row.jobId,
           kind: row.kind,
           status: row.status,
           error: row.error,
           genSize: row.genSize,
+          pairing: slotOfPairingId(row.pairingId),
           createdAt: new Date(row.createdAt).toISOString(),
           updatedAt: new Date(row.updatedAt).toISOString(),
         })),

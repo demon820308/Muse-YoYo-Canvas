@@ -1,9 +1,11 @@
-// bridge-store.ts — 桥的数据事实源：bridge_config 单行配置、
-// bridge_jobs 任务台账（守卫式状态机）、DB 支撑的同步租约。
+// bridge-store.ts — 桥的数据事实源：bridge_config 两行配对配置
+// （槽位 1 = 'bridge-1'、槽位 2 = 'bridge-2'，各自独立的地址/令牌/
+// 在线与错误/同步租约）、bridge_jobs 任务台账（守卫式状态机，每行
+// 带 pairing_id 标明归属槽位；存量行 pairing_id 为空一律按槽位 1）。
 // 桥任务是自包含记录：载荷与结果都存在行上，没有影子项目/节点。
 
 import type { SpaceDb } from "@hatch/space-sdk";
-import { and, asc, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 export type Db = SpaceDb<typeof schema>;
@@ -11,30 +13,61 @@ export type BridgeConfigRow = typeof schema.bridgeConfig.$inferSelect;
 export type BridgeJobRow = typeof schema.bridgeJobs.$inferSelect;
 export type BridgeJobStatus = BridgeJobRow["status"];
 
-export const BRIDGE_CONFIG_ID = "bridge";
+/** The bridge has exactly two pairing slots, numbered 1 and 2. */
+export type PairingSlot = 1 | 2;
 
-/** Reads the single bridge config row, creating it with defaults on
- * first touch so every other store function can assume it exists. */
-export async function getBridgeConfig(db: Db): Promise<BridgeConfigRow> {
+export const PAIRING_SLOTS: readonly PairingSlot[] = [1, 2];
+
+/** bridge_config row id for a slot. */
+export function configIdForSlot(slot: PairingSlot): string {
+  return slot === 2 ? "bridge-2" : "bridge-1";
+}
+
+/** The pairing_id stored on job rows for a slot. */
+export function pairingIdForSlot(slot: PairingSlot): string {
+  return configIdForSlot(slot);
+}
+
+/** Which slot a stored pairing_id belongs to. Legacy rows predate
+ * slots and carry null — they always count as slot 1. */
+export function slotOfPairingId(
+  pairingId: string | null | undefined,
+): PairingSlot {
+  return pairingId === "bridge-2" ? 2 : 1;
+}
+
+/** The effective pairing_id of a job row (legacy null → slot 1). */
+export function effectivePairingId(row: BridgeJobRow): string {
+  return pairingIdForSlot(slotOfPairingId(row.pairingId));
+}
+
+/** Reads one slot's config row, creating it with defaults on first
+ * touch so every other store function can assume it exists. */
+export async function getBridgeConfig(
+  db: Db,
+  slot: PairingSlot,
+): Promise<BridgeConfigRow> {
+  const id = configIdForSlot(slot);
   const rows = await db
     .select()
     .from(schema.bridgeConfig)
-    .where(eq(schema.bridgeConfig.id, BRIDGE_CONFIG_ID))
+    .where(eq(schema.bridgeConfig.id, id))
     .limit(1);
   if (rows[0]) return rows[0];
   const now = Date.now();
   await db
     .insert(schema.bridgeConfig)
-    .values({ id: BRIDGE_CONFIG_ID, updatedAt: now })
+    .values({ id, updatedAt: now })
     .onConflictDoNothing();
   const again = await db
     .select()
     .from(schema.bridgeConfig)
-    .where(eq(schema.bridgeConfig.id, BRIDGE_CONFIG_ID))
+    .where(eq(schema.bridgeConfig.id, id))
     .limit(1);
   return (
     again[0] ?? {
-      id: BRIDGE_CONFIG_ID,
+      id,
+      label: "",
       baseUrl: "",
       token: "",
       lastOnlineAt: null,
@@ -49,14 +82,15 @@ export async function getBridgeConfig(db: Db): Promise<BridgeConfigRow> {
 
 export async function updateBridgeConfig(
   db: Db,
+  slot: PairingSlot,
   patch: Partial<Omit<BridgeConfigRow, "id" | "updatedAt">>,
 ): Promise<BridgeConfigRow> {
-  await getBridgeConfig(db);
+  await getBridgeConfig(db, slot);
   await db
     .update(schema.bridgeConfig)
     .set({ ...patch, updatedAt: Date.now() })
-    .where(eq(schema.bridgeConfig.id, BRIDGE_CONFIG_ID));
-  return getBridgeConfig(db);
+    .where(eq(schema.bridgeConfig.id, configIdForSlot(slot)));
+  return getBridgeConfig(db, slot);
 }
 
 /** The only shape a bridge token may ever leave the server in: empty
@@ -72,8 +106,9 @@ export function maskBridgeToken(token: string | null | undefined): string {
 // Job ledger
 // ---------------------------------------------------------------------------
 
-/** Inserts a freshly seen local job. jobId is the idempotency key: a
- * job the bridge already knows returns false and is left untouched. */
+/** Inserts a freshly seen local job, stamped with the pairing slot
+ * that claimed it. jobId is the idempotency key: a job the bridge
+ * already knows returns false and is left untouched. */
 export async function insertBridgeJob(
   db: Db,
   job: {
@@ -81,6 +116,7 @@ export async function insertBridgeJob(
     kind: string;
     localProjectId: string | null;
     localNodeId: string | null;
+    pairingId: string;
     payload: string;
   },
 ): Promise<boolean> {
@@ -92,6 +128,7 @@ export async function insertBridgeJob(
       kind: job.kind,
       localProjectId: job.localProjectId,
       localNodeId: job.localNodeId,
+      pairingId: job.pairingId,
       payload: job.payload,
       status: "queued",
       createdAt: now,
@@ -161,7 +198,7 @@ export async function transitionBridgeJob(
   if (!current) return false;
   if (!fromStatuses.includes(current.status)) return false;
   const legal = LEGAL_TRANSITIONS[current.status];
-if (!legal || !legal.includes(toStatus)) return false;
+  if (!legal || !legal.includes(toStatus)) return false;
   const moved = await db
     .update(schema.bridgeJobs)
     .set({ status: toStatus, updatedAt: Date.now(), ...patch })
@@ -188,16 +225,28 @@ export async function patchBridgeJob(
     .where(eq(schema.bridgeJobs.jobId, jobId));
 }
 
+/** SQL condition matching rows owned by one slot. Slot 1 also owns
+ * the legacy rows whose pairing_id is still null. */
+function pairingWhere(slot: PairingSlot) {
+  const id = pairingIdForSlot(slot);
+  return slot === 1
+    ? or(eq(schema.bridgeJobs.pairingId, id), isNull(schema.bridgeJobs.pairingId))
+    : eq(schema.bridgeJobs.pairingId, id);
+}
+
 export async function listBridgeJobsByStatus(
   db: Db,
   statuses: readonly BridgeJobStatus[],
   limit?: number,
+  slot?: PairingSlot,
 ): Promise<BridgeJobRow[]> {
   if (statuses.length === 0) return [];
+  const statusWhere = inArray(schema.bridgeJobs.status, [...statuses]);
+  const where = slot != null ? and(statusWhere, pairingWhere(slot)) : statusWhere;
   const query = db
     .select()
     .from(schema.bridgeJobs)
-    .where(inArray(schema.bridgeJobs.status, [...statuses]))
+    .where(where)
     .orderBy(asc(schema.bridgeJobs.createdAt));
   return limit != null ? query.limit(limit) : query;
 }
@@ -275,18 +324,21 @@ export async function deleteBridgeJobsByIds(
 }
 
 // ---------------------------------------------------------------------------
-// Sync lease (DB-backed; action processes are stateless)
+// Sync lease (DB-backed, one per slot; action processes are stateless)
 // ---------------------------------------------------------------------------
 
-/** Takes the sync lease when it is free or expired. The conditional
- * update is the whole lock: exactly one racing round can move
- * syncLeaseUntil from an expired value to its own deadline. */
+/** Takes one slot's sync lease when it is free or expired. The
+ * conditional update is the whole lock: exactly one racing round
+ * per slot can move that slot's syncLeaseUntil from an expired
+ * value to its own deadline. Leases are per-slot, so a round on
+ * slot 1 never blocks slot 2. */
 export async function acquireSyncLease(
   db: Db,
+  slot: PairingSlot,
   owner: string,
   ttlMs = 300_000,
 ): Promise<boolean> {
-  await getBridgeConfig(db);
+  await getBridgeConfig(db, slot);
   const now = Date.now();
   const taken = await db
     .update(schema.bridgeConfig)
@@ -297,7 +349,7 @@ export async function acquireSyncLease(
     })
     .where(
       and(
-        eq(schema.bridgeConfig.id, BRIDGE_CONFIG_ID),
+        eq(schema.bridgeConfig.id, configIdForSlot(slot)),
         sql`(${schema.bridgeConfig.syncLeaseUntil} is null or ${schema.bridgeConfig.syncLeaseUntil} <= ${now})`,
       ),
     )
@@ -305,13 +357,17 @@ export async function acquireSyncLease(
   return taken.length > 0;
 }
 
-export async function releaseSyncLease(db: Db, owner: string): Promise<void> {
+export async function releaseSyncLease(
+  db: Db,
+  slot: PairingSlot,
+  owner: string,
+): Promise<void> {
   await db
     .update(schema.bridgeConfig)
     .set({ syncLeaseUntil: null, syncLeaseOwner: null, updatedAt: Date.now() })
     .where(
       and(
-        eq(schema.bridgeConfig.id, BRIDGE_CONFIG_ID),
+        eq(schema.bridgeConfig.id, configIdForSlot(slot)),
         eq(schema.bridgeConfig.syncLeaseOwner, owner),
       ),
     );

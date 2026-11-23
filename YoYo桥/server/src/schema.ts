@@ -1,11 +1,13 @@
 // Drizzle schema for the YoYo Bridge space.
 //
 // Two tables only — the bridge is deliberately self-contained (no
-// canvas projects / nodes / graph): bridge_config is the single
-// pairing row (id fixed 'bridge'); bridge_jobs is the job ledger,
-// one row per local job, carrying its payload and its result until
-// the result has been delivered back to the local side and the row
-// is slimmed to its audit fields at cleanup.
+// canvas projects / nodes / graph): bridge_config holds one row per
+// pairing slot (ids 'bridge-1' / 'bridge-2'); bridge_jobs is the job
+// ledger, one row per local job, carrying its payload and its result
+// until the result has been delivered back to the local side and the
+// row is slimmed to its audit fields at cleanup. A job's pairing_id
+// names the slot that claimed it ('bridge-1' / 'bridge-2'); rows
+// written before slots existed have it null and count as slot 1.
 //
 // Timestamps are plain integer milliseconds (the bridge contract's
 // wire shape), not timestamp-mode columns.
@@ -14,6 +16,7 @@ import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const bridgeConfig = sqliteTable("bridge_config", {
   id: text("id").primaryKey(),
+  label: text("label").notNull().default(""),
   baseUrl: text("base_url").notNull().default(""),
   token: text("token").notNull().default(""),
   lastOnlineAt: integer("last_online_at"),
@@ -34,6 +37,7 @@ export const bridgeJobs = sqliteTable("bridge_jobs", {
     .default("queued"),
   localProjectId: text("local_project_id"),
   localNodeId: text("local_node_id"),
+  pairingId: text("pairing_id"),
   payload: text("payload").notNull().default("{}"),
   jobDir: text("job_dir"),
   resultType: text("result_type", { enum: ["media", "text"] }),

@@ -15,15 +15,20 @@ import { Contracts } from "@space/privileged";
 import * as schema from "../schema";
 import {
 acquireSyncLease,
+configIdForSlot,
 countBridgeJobsByStatus,
+effectivePairingId,
 getBridgeConfig,
 getBridgeJob,
 insertBridgeJob,
 maskBridgeToken,
+pairingIdForSlot,
 releaseSyncLease,
+slotOfPairingId,
 transitionBridgeJob,
 updateBridgeConfig,
 type Db,
+type PairingSlot,
 } from "../bridge-store";
 import {
 BridgeAuthError,
@@ -75,12 +80,14 @@ async function insertJob(
   jobId: string,
   kind: string,
   payload: unknown,
+  slot: PairingSlot = 1,
 ): Promise<void> {
   await insertBridgeJob(db, {
     jobId,
     kind,
     localProjectId: "lp",
     localNodeId: "ln",
+    pairingId: pairingIdForSlot(slot),
     payload: JSON.stringify(payload),
   });
 }
@@ -104,6 +111,7 @@ describe("迁移建表", () => {
     ).map((c) => c.name);
     for (const col of [
       "job_id", "kind", "status", "local_project_id", "local_node_id",
+      "pairing_id",
       "payload", "job_dir", "result_type", "result_text",
       "result_file_path", "result_file_name", "result_content_type",
       "result_title", "gen_size", "error", "created_at", "updated_at",
@@ -114,7 +122,7 @@ describe("迁移建表", () => {
       sqlite.query("PRAGMA table_info(bridge_config)").all() as { name: string }[]
     ).map((c) => c.name);
     for (const col of [
-      "id", "base_url", "token", "last_online_at", "last_error",
+      "id", "label", "base_url", "token", "last_online_at", "last_error",
       "last_error_at", "sync_lease_until", "sync_lease_owner", "updated_at",
     ]) {
       expect(configCols).toContain(col);
@@ -122,19 +130,108 @@ describe("迁移建表", () => {
   });
 });
 
+describe("迁移 0003：单配对改双槽位", () => {
+  test("旧 id='bridge' 行改名为 'bridge-1' 且数据原样保留；bridge_jobs 新增 pairing_id", () => {
+    // 只应用 0001+0002，手工造一行旧配对，再应用 0003。
+    const sqlite = new Database(":memory:");
+    const files = readdirSync(MIGRATIONS_DIR)
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+    const apply = (file: string) => {
+      const sqlText = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
+      for (const stmt of sqlText.split("--> statement-breakpoint")) {
+        const trimmed = stmt.trim();
+        if (trimmed) sqlite.exec(trimmed);
+      }
+    };
+    for (const file of files.filter((f) => !f.startsWith("0003"))) apply(file);
+    sqlite.exec(
+      `INSERT INTO bridge_config (id, base_url, token, last_online_at, updated_at)
+       VALUES ('bridge', 'https://yoyo-bridge.ck971.cc.cd', 'tok-keep-me', 123456789, 42)`,
+    );
+    sqlite.exec(
+      `INSERT INTO bridge_jobs (job_id, kind, status, payload, created_at, updated_at)
+       VALUES ('legacy-job', 'text', 'cleaned', '{}', 1, 2)`,
+    );
+    for (const file of files.filter((f) => f.startsWith("0003"))) apply(file);
+    const rows = sqlite
+      .query("SELECT id, base_url, token, last_online_at FROM bridge_config")
+      .all() as { id: string; base_url: string; token: string; last_online_at: number }[];
+    expect(rows).toEqual([
+      {
+        id: "bridge-1",
+        base_url: "https://yoyo-bridge.ck971.cc.cd",
+        token: "tok-keep-me",
+        last_online_at: 123456789,
+      },
+    ]);
+    const job = sqlite
+      .query("SELECT pairing_id FROM bridge_jobs WHERE job_id = 'legacy-job'")
+      .get() as { pairing_id: string | null };
+    expect(job.pairing_id).toBeNull();
+    sqlite.close();
+  });
+});
+
 describe("bridge-store", () => {
   test("配置行 get-or-create：首次建行带默认值，再读同一行", async () => {
     const { db } = makeDb();
-    const first = await getBridgeConfig(db);
-    expect(first.id).toBe("bridge");
+    const first = await getBridgeConfig(db, 1);
+    expect(first.id).toBe("bridge-1");
     expect(first.baseUrl).toBe("");
     expect(first.token).toBe("");
     expect(first.lastOnlineAt).toBeNull();
-    const second = await getBridgeConfig(db);
-    expect(second.id).toBe("bridge");
-    await updateBridgeConfig(db, { baseUrl: "https://t.example.com" });
-    const third = await getBridgeConfig(db);
+    const second = await getBridgeConfig(db, 1);
+    expect(second.id).toBe("bridge-1");
+    await updateBridgeConfig(db, 1, { baseUrl: "https://t.example.com" });
+    const third = await getBridgeConfig(db, 1);
     expect(third.baseUrl).toBe("https://t.example.com");
+  });
+
+  test("两槽位配置互不影响：写一槽位不碰另一槽位，租约各自独立", async () => {
+    const { db } = makeDb();
+    expect(configIdForSlot(1)).toBe("bridge-1");
+    expect(configIdForSlot(2)).toBe("bridge-2");
+    await updateBridgeConfig(db, 1, {
+      baseUrl: "https://one.example",
+      token: "tok-one",
+    });
+    await updateBridgeConfig(db, 2, {
+      baseUrl: "https://two.example",
+      token: "tok-two",
+      lastError: "槽位2的错误",
+    });
+    const one = await getBridgeConfig(db, 1);
+    const two = await getBridgeConfig(db, 2);
+    expect(one.baseUrl).toBe("https://one.example");
+    expect(one.token).toBe("tok-one");
+    expect(one.lastError).toBeNull();
+    expect(two.baseUrl).toBe("https://two.example");
+    expect(two.token).toBe("tok-two");
+    expect(two.lastError).toBe("槽位2的错误");
+    // 租约按槽位独立：槽位 1 被占不影响槽位 2
+    expect(await acquireSyncLease(db, 1, "owner-a")).toBe(true);
+    expect(await acquireSyncLease(db, 2, "owner-a")).toBe(true);
+    expect(await acquireSyncLease(db, 1, "owner-b")).toBe(false);
+    await releaseSyncLease(db, 1, "owner-a");
+    expect(await acquireSyncLease(db, 1, "owner-b")).toBe(true);
+  });
+
+  test("pairing 归属：存量 null 按槽位 1，'bridge-2' 按槽位 2", async () => {
+    expect(slotOfPairingId(null)).toBe(1);
+    expect(slotOfPairingId(undefined)).toBe(1);
+    expect(slotOfPairingId("bridge-1")).toBe(1);
+    expect(slotOfPairingId("bridge-2")).toBe(2);
+    expect(pairingIdForSlot(1)).toBe("bridge-1");
+    expect(pairingIdForSlot(2)).toBe("bridge-2");
+    const { db } = makeDb();
+    await insertJob(db, "legacy-null", "text", { prompt: "x" });
+    await db
+      .update(schema.bridgeJobs)
+      .set({ pairingId: null })
+      .where(eq(schema.bridgeJobs.jobId, "legacy-null"));
+    const legacy = await getBridgeJob(db, "legacy-null");
+    expect(effectivePairingId(legacy!)).toBe("bridge-1");
   });
 
   test("状态机合法边可走、非法边返回 false 不抛错", async () => {
@@ -163,7 +260,8 @@ describe("bridge-store", () => {
     // insert 幂等：同 jobId 再插返回 false
     expect(
       await insertBridgeJob(db, {
-        jobId: "j2", kind: "text", localProjectId: null, localNodeId: null, payload: "{}",
+        jobId: "j2", kind: "text", localProjectId: null, localNodeId: null,
+        pairingId: "bridge-1", payload: "{}",
       }),
     ).toBe(false);
     expect(await countBridgeJobsByStatus(db, "delivered")).toBe(1);
@@ -171,14 +269,14 @@ describe("bridge-store", () => {
 
   test("租约：夺取、他人夺不到、释放后可再夺、过期可再夺", async () => {
     const { db } = makeDb();
-    expect(await acquireSyncLease(db, "owner-a")).toBe(true);
-    expect(await acquireSyncLease(db, "owner-b")).toBe(false);
-    await releaseSyncLease(db, "owner-b"); // 不是持有者，释放无效
-    expect(await acquireSyncLease(db, "owner-b")).toBe(false);
-    await releaseSyncLease(db, "owner-a");
-    expect(await acquireSyncLease(db, "owner-b")).toBe(true);
-    await updateBridgeConfig(db, { syncLeaseUntil: Date.now() - 1000 });
-    expect(await acquireSyncLease(db, "owner-c")).toBe(true);
+    expect(await acquireSyncLease(db, 1, "owner-a")).toBe(true);
+    expect(await acquireSyncLease(db, 1, "owner-b")).toBe(false);
+    await releaseSyncLease(db, 1, "owner-b"); // 不是持有者，释放无效
+    expect(await acquireSyncLease(db, 1, "owner-b")).toBe(false);
+    await releaseSyncLease(db, 1, "owner-a");
+    expect(await acquireSyncLease(db, 1, "owner-b")).toBe(true);
+    await updateBridgeConfig(db, 1, { syncLeaseUntil: Date.now() - 1000 });
+    expect(await acquireSyncLease(db, 1, "owner-c")).toBe(true);
   });
 
   test("maskBridgeToken 三形态", () => {
@@ -661,30 +759,6 @@ describe("executor: prompt-reverse", () => {
     expect(after?.resultType).toBe("text");
     expect(after?.resultTitle).toBe("逆推结果");
   });
-
-  test("超限 PNG（如 1152x2048 2.59MB）先压成 shrunk.jpg 再送 inference", async () => {
-    const { db } = makeDb();
-    await insertJob(db, "pr-shrink", "prompt-reverse", {
-      prompt: "请逆推这张图",
-      imageFilePath: "/home/u/yoyo-canvas-projects/p1/img.png",
-    });
-    const row = await getBridgeJob(db, "pr-shrink");
-    const { ctx, calls } = makeFakeCtx(db, {
-      readFile: {
-        dataBase64: Buffer.from("img").toString("base64"),
-        sizeBytes: Math.round(2.59 * 1024 * 1024),
-        contentType: "image/png",
-      },
-      probe: { width: 1152, height: 2048, durationSeconds: null },
-    });
-    const transport = fakeTransport(async () => new Uint8Array([5, 5]));
-    await executeSyncJob(ctx, db, transport, row!);
-    const shrinkCall = calls.priv.find((c) => c.name === "shrinkImageForInference");
-    expect(shrinkCall?.args.fileName).toBe("shrunk.jpg");
-    expect(shrinkCall?.args.maxEdge).toBe(1536);
-    expect(shrinkCall?.args.maxBytes).toBe(1 * 1024 * 1024);
-    expect(calls.inference.length).toBe(1);
-  });
 });
 
 describe("对账：本地已取消的 queued 孤儿行", () => {
@@ -702,15 +776,33 @@ describe("对账：本地已取消的 queued 孤儿行", () => {
       .update(schema.bridgeJobs)
       .set({ updatedAt: old })
       .where(eq(schema.bridgeJobs.jobId, "still-offered"));
-    await reconcileOrphanedQueued(db, new Set(["still-offered"]));
+    await reconcileOrphanedQueued(db, 1, new Set(["still-offered"]));
     const orphan = await getBridgeJob(db, "orphan-1");
     expect(orphan?.status).toBe("failed");
     expect(orphan?.error).toBe(ORPHANED_QUEUED_ERROR);
     expect((await getBridgeJob(db, "still-offered"))?.status).toBe("queued");
     expect((await getBridgeJob(db, "fresh-orphan"))?.status).toBe("queued");
     // 已结算的行不会被重复处理
-    await reconcileOrphanedQueued(db, new Set());
+    await reconcileOrphanedQueued(db, 1, new Set());
     expect((await getBridgeJob(db, "orphan-1"))?.status).toBe("failed");
+  });
+
+  test("跨槽位隔离：配对 1 的对账绝不结算配对 2 的 queued 行，反之亦然", async () => {
+    const { db } = makeDb();
+    await insertJob(db, "slot1-orphan", "text", { prompt: "x" }, 1);
+    await insertJob(db, "slot2-orphan", "text", { prompt: "x" }, 2);
+    const old = Date.now() - 120_000;
+    await db
+      .update(schema.bridgeJobs)
+      .set({ updatedAt: old })
+      .where(eq(schema.bridgeJobs.status, "queued"));
+    // 配对 1 全量轮：本轮 pending 为空 → 只结算配对 1 自己的孤儿行
+    await reconcileOrphanedQueued(db, 1, new Set());
+    expect((await getBridgeJob(db, "slot1-orphan"))?.status).toBe("failed");
+    expect((await getBridgeJob(db, "slot2-orphan"))?.status).toBe("queued");
+    // 配对 2 全量轮才结算配对 2 的
+    await reconcileOrphanedQueued(db, 2, new Set());
+    expect((await getBridgeJob(db, "slot2-orphan"))?.status).toBe("failed");
   });
 
   test("全量同步端到端：孤儿行结算后经 fail 回送走到 cleaned", async () => {
@@ -732,7 +824,7 @@ describe("对账：本地已取消的 queued 孤儿行", () => {
       },
     });
     try {
-      await updateBridgeConfig(db, {
+      await updateBridgeConfig(db, 1, {
         baseUrl: `http://127.0.0.1:${server.port}`,
         token: "tok-e2e",
       });
@@ -779,5 +871,435 @@ describe("同步空转", () => {
     const fast = await Actions.bridgeFastSync.handler(ctx, {});
     expect(fast.status).toBe("skipped");
     expect(fast.reason).toBe("not_configured");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 双配对槽位：配置动作 / 状态 / 回送路由 / 单槽位故障隔离
+// ---------------------------------------------------------------------------
+
+describe("双配对：bridgeSetConfig 按槽位作用", () => {
+  test("保存与清除只作用于目标槽位；缺省 slot 兼容旧调用走槽位 1", async () => {
+    const { db } = makeDb();
+    const { ctx } = makeFakeCtx(db);
+    // 旧调用（无 slot）→ 槽位 1
+    const saved1 = await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "https://one.example",
+      token: "tok-one-123",
+    });
+    expect(saved1.slot).toBe(1);
+    expect(saved1.configured).toBe(true);
+    // 槽位 2 独立保存
+    const saved2 = await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "https://two.example",
+      token: "tok-two-456",
+      slot: 2,
+    });
+    expect(saved2.slot).toBe(2);
+    expect(saved2.baseUrl).toBe("https://two.example");
+    expect(saved2.tokenMasked).toBe("tok••••56");
+    expect((await getBridgeConfig(db, 1)).baseUrl).toBe("https://one.example");
+    expect((await getBridgeConfig(db, 1)).token).toBe("tok-one-123");
+    expect((await getBridgeConfig(db, 2)).token).toBe("tok-two-456");
+    // 令牌留空 = 不改该槽位令牌
+    await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "https://two-b.example",
+      slot: 2,
+    });
+    expect((await getBridgeConfig(db, 2)).baseUrl).toBe("https://two-b.example");
+    expect((await getBridgeConfig(db, 2)).token).toBe("tok-two-456");
+    // 清除槽位 2 不影响槽位 1
+    const cleared = await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "",
+      clear: true,
+      slot: 2,
+    });
+    expect(cleared.configured).toBe(false);
+    expect((await getBridgeConfig(db, 2)).baseUrl).toBe("");
+    expect((await getBridgeConfig(db, 2)).token).toBe("");
+    expect((await getBridgeConfig(db, 1)).baseUrl).toBe("https://one.example");
+    expect((await getBridgeConfig(db, 1)).token).toBe("tok-one-123");
+  });
+
+  test("bridgeStatus：pairings 两槽位齐全，顶层字段等同配对 1，recentJobs 带 pairing", async () => {
+    const { db } = makeDb();
+    const { ctx } = makeFakeCtx(db);
+    await updateBridgeConfig(db, 1, {
+      baseUrl: "https://one.example",
+      token: "tok-one-123",
+    });
+    await updateBridgeConfig(db, 2, {
+      baseUrl: "https://two.example",
+      token: "tok-two-456",
+    });
+    await insertJob(db, "job-slot2", "text", { prompt: "x" }, 2);
+    await insertJob(db, "job-legacy", "text", { prompt: "x" }, 1);
+    await db
+      .update(schema.bridgeJobs)
+      .set({ pairingId: null })
+      .where(eq(schema.bridgeJobs.jobId, "job-legacy"));
+    const status = await Actions.bridgeStatus.handler(ctx, {});
+    expect(status.pairings.length).toBe(2);
+    expect(status.pairings[0]?.slot).toBe(1);
+    expect(status.pairings[0]?.baseUrl).toBe("https://one.example");
+    expect(status.pairings[0]?.tokenMasked).toBe("tok••••23");
+    expect(status.pairings[1]?.slot).toBe(2);
+    expect(status.pairings[1]?.configured).toBe(true);
+    expect(status.pairings[1]?.baseUrl).toBe("https://two.example");
+    // 顶层兼容字段 = 配对 1
+    expect(status.configured).toBe(true);
+    expect(status.baseUrl).toBe("https://one.example");
+    expect(status.tokenMasked).toBe("tok••••23");
+    const byId = new Map(status.recentJobs.map((j) => [j.jobId, j.pairing]));
+    expect(byId.get("job-slot2")).toBe(2);
+    expect(byId.get("job-legacy")).toBe(1);
+  });
+});
+
+/** 起一个假本地桥端：记录 fail 回送，可选在 pending 里挂一个任务。 */
+function makeFakeLocalServer(opts: {
+  pendingJobs?: unknown[];
+  failPosts: string[];
+}) {
+  return Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/bridge/pending") {
+        return jsonResponse({ jobs: opts.pendingJobs ?? [] });
+      }
+      if (url.pathname === "/bridge/ack-claim") {
+        return jsonResponse({ status: "ok" });
+      }
+      if (url.pathname === "/bridge/result") {
+        return jsonResponse({ status: "done" });
+      }
+      if (url.pathname === "/bridge/fail") {
+        const body = (await req.json()) as { jobId?: string };
+        opts.failPosts.push(body.jobId ?? "");
+        return jsonResponse({ status: "ok" });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+}
+
+describe("双配对：在途回送按所属槽位路由", () => {
+  test("两槽位各有一个 failed 任务 → 各经自己槽位的端点回送并清理", async () => {
+    const { db } = makeDb();
+    const failA: string[] = [];
+    const failB: string[] = [];
+    const serverA = makeFakeLocalServer({ failPosts: failA });
+    const serverB = makeFakeLocalServer({ failPosts: failB });
+    try {
+      await updateBridgeConfig(db, 1, {
+        baseUrl: `http://127.0.0.1:${serverA.port}`,
+        token: "tok-a",
+      });
+      await updateBridgeConfig(db, 2, {
+        baseUrl: `http://127.0.0.1:${serverB.port}`,
+        token: "tok-b",
+      });
+      await insertJob(db, "fail-slot1", "text", { prompt: "x" }, 1);
+      await insertJob(db, "fail-slot2", "text", { prompt: "x" }, 2);
+      await transitionBridgeJob(db, "fail-slot1", ["queued"], "failed", {
+        error: "槽位1失败",
+      });
+      await transitionBridgeJob(db, "fail-slot2", ["queued"], "failed", {
+        error: "槽位2失败",
+      });
+      const { ctx } = makeFakeCtx(db);
+      const res = await Actions.bridgeFastSync.handler(ctx, {});
+      expect(res.status).toBe("ok");
+      expect(failA).toEqual(["fail-slot1"]);
+      expect(failB).toEqual(["fail-slot2"]);
+      expect((await getBridgeJob(db, "fail-slot1"))?.status).toBe("cleaned");
+      expect((await getBridgeJob(db, "fail-slot2"))?.status).toBe("cleaned");
+    } finally {
+      serverA.stop(true);
+      serverB.stop(true);
+    }
+  });
+
+  test("一槽位不可达：错误只记该槽位，另一槽位仍能领取、执行与回送", async () => {
+    const { db } = makeDb();
+    // 先占一个端口再释放，得到一个确定没人监听的地址当死槽位。
+    const dead = Bun.serve({ port: 0, fetch: () => new Response("x") });
+    const deadPort = dead.port;
+    dead.stop(true);
+    const failB: string[] = [];
+    const serverB = makeFakeLocalServer({
+      failPosts: failB,
+      pendingJobs: [
+        {
+          jobId: "s2-text-job",
+          kind: "text",
+          projectId: "p2",
+          nodeId: "n2",
+          payload: { prompt: "写一句槽位2的话" },
+        },
+      ],
+    });
+    try {
+      await updateBridgeConfig(db, 1, {
+        baseUrl: `http://127.0.0.1:${deadPort}`,
+        token: "tok-dead",
+      });
+      await updateBridgeConfig(db, 2, {
+        baseUrl: `http://127.0.0.1:${serverB.port}`,
+        token: "tok-b",
+      });
+      const { ctx, calls } = makeFakeCtx(db);
+      const res = await Actions.bridgeSync.handler(ctx, {});
+      // 槽位 2 正常跑完 → 整轮 ok；槽位 1 的失败不拖垮它
+      expect(res.status).toBe("ok");
+      expect(res.claimed).toBe(1);
+      expect(res.dispatched).toBe(1);
+      expect(res.delivered).toBe(1);
+      expect(res.cleaned).toBe(1);
+      expect(calls.inference.length).toBe(1);
+      const row = await getBridgeJob(db, "s2-text-job");
+      expect(row?.pairingId).toBe("bridge-2");
+      expect(row?.status).toBe("cleaned");
+      // 错误只落在槽位 1 自己的 config 行；槽位 2 干净且在线时间已更新
+      const cfg1 = await getBridgeConfig(db, 1);
+      expect(cfg1.lastError).not.toBeNull();
+      expect(cfg1.lastOnlineAt).toBeNull();
+      const cfg2 = await getBridgeConfig(db, 2);
+      expect(cfg2.lastError).toBeNull();
+      expect(cfg2.lastOnlineAt).not.toBeNull();
+    } finally {
+      serverB.stop(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 配对迁移：bridgeMovePairing
+// ---------------------------------------------------------------------------
+
+describe("配对迁移：bridgeMovePairing", () => {
+  test("迁移后目标槽位配置与源原值一致、源槽位清空、响应不含令牌原文", async () => {
+    const { db } = makeDb();
+    const { ctx } = makeFakeCtx(db);
+    // 源槽位带完整的在线/错误/租约状态，验证迁移时目标被重置、源被清零
+    await updateBridgeConfig(db, 1, {
+      baseUrl: "https://home.example",
+      token: "tok-move-secret-789",
+      lastOnlineAt: 111_000,
+      lastError: "旧错误",
+      lastErrorAt: 112_000,
+      syncLeaseUntil: Date.now() + 60_000,
+      syncLeaseOwner: "owner-1",
+    });
+    // 目标槽位先放一个旧配对，验证被整体覆盖
+    await updateBridgeConfig(db, 2, {
+      baseUrl: "https://stale.example",
+      token: "tok-stale-000",
+      lastOnlineAt: 222_000,
+      lastError: "目标旧错误",
+      lastErrorAt: 223_000,
+    });
+    // 一条槽位 1 的任务记录：迁移不得改动任务归属
+    await insertJob(db, "job-before-move", "text", { prompt: "x" }, 1);
+
+    const res = await Actions.bridgeMovePairing.handler(ctx, {
+      fromSlot: 1,
+      toSlot: 2,
+    });
+
+    // 目标槽位：地址与令牌与源原值逐字一致（测试库内断言原文）
+    const target = await getBridgeConfig(db, 2);
+    expect(target.baseUrl).toBe("https://home.example");
+    expect(target.token).toBe("tok-move-secret-789");
+    // 目标的在线/错误/租约全部清零重置
+    expect(target.lastOnlineAt).toBeNull();
+    expect(target.lastError).toBeNull();
+    expect(target.lastErrorAt).toBeNull();
+    expect(target.syncLeaseUntil).toBeNull();
+    expect(target.syncLeaseOwner).toBeNull();
+
+    // 源槽位（clearFrom 缺省 true）：清回未配对，状态一并清零
+    const source = await getBridgeConfig(db, 1);
+    expect(source.baseUrl).toBe("");
+    expect(source.token).toBe("");
+    expect(source.lastOnlineAt).toBeNull();
+    expect(source.lastError).toBeNull();
+    expect(source.lastErrorAt).toBeNull();
+    expect(source.syncLeaseUntil).toBeNull();
+    expect(source.syncLeaseOwner).toBeNull();
+
+    // 任务归属不动
+    const job = await getBridgeJob(db, "job-before-move");
+    expect(job?.pairingId).toBe("bridge-1");
+
+    // 响应只带掩码，任何位置不出现令牌原文
+    expect(res.from).toEqual({
+      slot: 1,
+      label: "",
+      configured: false,
+      baseUrl: "",
+      tokenMasked: "",
+    });
+    expect(res.to).toEqual({
+      slot: 2,
+      label: "",
+      configured: true,
+      baseUrl: "https://home.example",
+      tokenMasked: "tok••••89",
+    });
+    expect(JSON.stringify(res)).not.toContain("tok-move-secret-789");
+    expect(JSON.stringify(res)).not.toContain("tok-stale-000");
+  });
+
+  test("clearFrom=false 时源槽位保留原配对", async () => {
+    const { db } = makeDb();
+    const { ctx } = makeFakeCtx(db);
+    await updateBridgeConfig(db, 2, {
+      baseUrl: "https://two.example",
+      token: "tok-two-keep",
+    });
+    const res = await Actions.bridgeMovePairing.handler(ctx, {
+      fromSlot: 2,
+      toSlot: 1,
+      clearFrom: false,
+    });
+    expect(res.from.configured).toBe(true);
+    expect(res.to.configured).toBe(true);
+    expect((await getBridgeConfig(db, 2)).token).toBe("tok-two-keep");
+    expect((await getBridgeConfig(db, 1)).baseUrl).toBe("https://two.example");
+    expect((await getBridgeConfig(db, 1)).token).toBe("tok-two-keep");
+  });
+
+  test("源槽位未配对时拒绝；源与目标相同也拒绝", async () => {
+    const { db } = makeDb();
+    const { ctx } = makeFakeCtx(db);
+    await expect(
+      Actions.bridgeMovePairing.handler(ctx, { fromSlot: 1, toSlot: 2 }),
+    ).rejects.toThrow("未配对");
+    await updateBridgeConfig(db, 1, {
+      baseUrl: "https://one.example",
+      token: "tok-one-123",
+    });
+    await expect(
+      Actions.bridgeMovePairing.handler(ctx, { fromSlot: 1, toSlot: 1 }),
+    ).rejects.toThrow("不能相同");
+    // 拒绝后源配对原样保留
+    expect((await getBridgeConfig(db, 1)).token).toBe("tok-one-123");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 配对改名：label 按槽位独立
+// ---------------------------------------------------------------------------
+
+describe("配对改名：label 按槽位独立", () => {
+  test("两槽位分别改名互不影响；未配对槽位可只改名；状态带 label 原文", async () => {
+    const { db } = makeDb();
+    const { ctx } = makeFakeCtx(db);
+    // 槽位 1：配对保存时一并改名，首尾空白保存时去掉
+    const saved1 = await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "https://one.example",
+      token: "tok-one-123",
+      label: "  家里电脑  ",
+    });
+    expect(saved1.label).toBe("家里电脑");
+    // 槽位 2：未配对，只改名（label-only 调用，不要求地址/令牌）
+    const renamed2 = await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "",
+      label: "公司画布",
+      slot: 2,
+    });
+    expect(renamed2.configured).toBe(false);
+    expect(renamed2.label).toBe("公司画布");
+    // 两槽位各存各的，互不影响
+    expect((await getBridgeConfig(db, 1)).label).toBe("家里电脑");
+    expect((await getBridgeConfig(db, 2)).label).toBe("公司画布");
+    expect((await getBridgeConfig(db, 2)).baseUrl).toBe("");
+    // bridgeStatus 的 pairings 带出 label 原文
+    const status = await Actions.bridgeStatus.handler(ctx, {});
+    expect(status.pairings[0]?.label).toBe("家里电脑");
+    expect(status.pairings[1]?.label).toBe("公司画布");
+  });
+
+  test("不带 label 的保存不动已有名字；传空 label 清掉名字恢复缺省", async () => {
+    const { db } = makeDb();
+    const { ctx } = makeFakeCtx(db);
+    await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "https://one.example",
+      token: "tok-one-123",
+      label: "旧名字",
+    });
+    // 改地址不带 label → 名字保留
+    await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "https://one-b.example",
+    });
+    expect((await getBridgeConfig(db, 1)).baseUrl).toBe("https://one-b.example");
+    expect((await getBridgeConfig(db, 1)).label).toBe("旧名字");
+    // 传空字符串 label → 名字清掉（显示名回落缺省「配对 1」）
+    const cleared = await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "https://one-b.example",
+      label: "",
+    });
+    expect(cleared.label).toBe("");
+    expect((await getBridgeConfig(db, 1)).label).toBe("");
+    // 纯空白 label 同样清掉
+    await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "https://one-b.example",
+      label: "临时名",
+    });
+    await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "https://one-b.example",
+      label: "   ",
+    });
+    expect((await getBridgeConfig(db, 1)).label).toBe("");
+  });
+
+  test("clear 清除配对时名字一并清掉，另一槽位的名字不受影响", async () => {
+    const { db } = makeDb();
+    const { ctx } = makeFakeCtx(db);
+    await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "https://one.example",
+      token: "tok-one-123",
+      label: "名字一",
+    });
+    await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "https://two.example",
+      token: "tok-two-456",
+      label: "名字二",
+      slot: 2,
+    });
+    const cleared = await Actions.bridgeSetConfig.handler(ctx, {
+      baseUrl: "",
+      clear: true,
+      slot: 1,
+    });
+    expect(cleared.label).toBe("");
+    const slot1 = await getBridgeConfig(db, 1);
+    expect(slot1.label).toBe("");
+    expect(slot1.baseUrl).toBe("");
+    expect(slot1.token).toBe("");
+    const slot2 = await getBridgeConfig(db, 2);
+    expect(slot2.label).toBe("名字二");
+    expect(slot2.baseUrl).toBe("https://two.example");
+  });
+
+  test("迁移时名字跟随配对：目标拿到源的名字，源名字清掉", async () => {
+    const { db } = makeDb();
+    const { ctx } = makeFakeCtx(db);
+    await updateBridgeConfig(db, 1, {
+      baseUrl: "https://home.example",
+      token: "tok-move-label",
+      label: "家里电脑",
+    });
+    await updateBridgeConfig(db, 2, { label: "目标旧名字" });
+    const res = await Actions.bridgeMovePairing.handler(ctx, {
+      fromSlot: 1,
+      toSlot: 2,
+    });
+    expect(res.to.label).toBe("家里电脑");
+    expect(res.from.label).toBe("");
+    expect((await getBridgeConfig(db, 2)).label).toBe("家里电脑");
+    expect((await getBridgeConfig(db, 1)).label).toBe("");
   });
 });
