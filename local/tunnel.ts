@@ -25,6 +25,7 @@ import {
   DEFAULT_HOSTNAME,
   extractTunnelId,
   isValidHostname,
+  parseCloudflareErrorCode,
   parseServiceState,
   parseTunnelList,
   parseVersionOutput,
@@ -41,6 +42,7 @@ export {
   DEFAULT_HOSTNAME,
   extractTunnelId,
   isValidHostname,
+  parseCloudflareErrorCode,
   parseServiceState,
   parseTunnelList,
   parseVersionOutput,
@@ -66,6 +68,11 @@ export type TunnelDeps = {
   platform: () => string;
   probe: (hostname: string) => Promise<boolean>;
   probeHttp?: (hostname: string, token?: string | null) => Promise<number | null>;
+  probeDetail?: (
+    hostname: string,
+    token?: string | null,
+  ) => Promise<{ status: number | null; cfErrorCode?: number | null }>;
+  spawnTunnel?: (args: string[]) => ChildProcess;
 };
 
 const WIN_FALLBACK_BINS: Record<string, string[]> = {
@@ -191,10 +198,10 @@ async function defaultResolveDns(hostname: string): Promise<DnsRecords> {
   return { cname, a: a.filter((ip) => !FAKE_IP_RE.test(ip)), aaaa };
 }
 
-async function defaultProbeHttp(
+async function defaultProbeDetail(
   hostname: string,
   token?: string | null,
-): Promise<number | null> {
+): Promise<{ status: number | null; cfErrorCode?: number | null }> {
   try {
     const headers: Record<string, string> = {};
     if (token) headers.authorization = `Bearer ${token}`;
@@ -203,10 +210,21 @@ async function defaultProbeHttp(
       signal: AbortSignal.timeout(5_000),
       redirect: "manual",
     });
-    return res.status;
+    const cfErrorCode =
+      res.status === 530
+        ? parseCloudflareErrorCode(await res.text().catch(() => ""))
+        : null;
+    return { status: res.status, cfErrorCode };
   } catch {
-    return null;
+    return { status: null, cfErrorCode: null };
   }
+}
+
+async function defaultProbeHttp(
+  hostname: string,
+  token?: string | null,
+): Promise<number | null> {
+  return (await defaultProbeDetail(hostname, token)).status;
 }
 
 async function defaultProbe(hostname: string): Promise<boolean> {
@@ -222,6 +240,7 @@ export const defaultTunnelDeps: TunnelDeps = {
   platform: () => process.platform,
   probe: defaultProbe,
   probeHttp: defaultProbeHttp,
+  probeDetail: defaultProbeDetail,
 };
 
 export type JobKind =
@@ -272,8 +291,35 @@ export class TunnelWizard {
   private nextJobId = 1;
   private child: ChildProcess | null = null;
   private childLog: string[] = [];
+  private manualStop = false;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private restartAttempt = 0;
+  private ensureInFlight: Promise<string | null> | null = null;
 
   constructor(private deps: TunnelDeps = defaultTunnelDeps) {}
+
+  isManuallyStopped(): boolean {
+    return this.manualStop;
+  }
+
+  isHealing(): boolean {
+    return this.ensureInFlight !== null || this.restartTimer !== null;
+  }
+
+  hasLocalConfig(hostname = this.savedHostname()): boolean {
+    if (!isValidHostname(hostname)) return false;
+    const cfgPath = join(this.cfDir(), "config.yml");
+    if (!existsSync(cfgPath)) return false;
+    let text = "";
+    try {
+      text = readFileSync(cfgPath, "utf8");
+    } catch {
+      return false;
+    }
+    if (!text.includes(hostname)) return false;
+    const id = extractTunnelId(text);
+    return id !== null && existsSync(join(this.cfDir(), `${id}.json`));
+  }
 
   cfDir(): string {
     return join(this.deps.homeDir(), ".cloudflared");
@@ -460,13 +506,19 @@ export class TunnelWizard {
     hostname: string,
     token?: string | null,
   ): Promise<TunnelStatus["e2e"]> {
-    const httpStatus = this.deps.probeHttp
-      ? await this.deps.probeHttp(hostname, token)
-      : (await this.deps.probe(hostname))
-        ? token
-          ? 200
-          : 401
-        : null;
+    const probed = this.deps.probeDetail
+      ? await this.deps.probeDetail(hostname, token)
+      : this.deps.probeHttp
+        ? { status: await this.deps.probeHttp(hostname, token), cfErrorCode: null }
+        : {
+            status: (await this.deps.probe(hostname))
+              ? token
+                ? 200
+                : 401
+              : null,
+            cfErrorCode: null,
+          };
+    const httpStatus = probed.status;
     if (httpStatus === 200) {
       return {
         ok: true,
@@ -491,6 +543,14 @@ export class TunnelWizard {
           };
     }
     if (httpStatus === 530) {
+      if (probed.cfErrorCode === 1033) {
+        return {
+          ok: false,
+          httpStatus,
+          detail: "隧道尚未连上 Cloudflare（Error 1033），正等待本地隧道启动",
+          needsDnsOverwrite: false,
+        };
+      }
       return {
         ok: false,
         httpStatus,
@@ -532,7 +592,7 @@ export class TunnelWizard {
     ]);
     const config = this.checkConfig(hostname, tunnel?.id ?? null);
     let resolvedDns = dns;
-    if (e2e.httpStatus === 530 && dns.state === "created") {
+    if (e2e.httpStatus === 530 && e2e.needsDnsOverwrite && dns.state === "created") {
       resolvedDns = {
         state: "mismatch",
         detail: "公网返回 HTTP 530：DNS 可能仍指向旧隧道，请点「覆盖写解析」",
@@ -753,20 +813,25 @@ export class TunnelWizard {
         "装服务只支持 Windows；当前平台可手动运行：cloudflared service install",
       );
     }
+    this.manualStop = false;
+    this.clearRestartTimer();
     if (this.childRunning()) {
       append("先停止本页托管的 cloudflared 进程，避免与 Windows 服务冲突。\n");
-      this.stopRun();
+      this.stopChildProcess();
     }
     append("将弹出 Windows 管理员确认框（UAC），请点「是」。\n");
     const bin = resolveWinBin("cloudflared");
     const cfg = join(this.cfDir(), "config.yml");
     const psEsc = (s: string) => s.replace(/'/g, "''");
     // cloudflared service install 用 LocalSystem 跑服务，默认去 systemprofile 找配置；
-    // 这里顺手把服务 ImagePath 指向当前用户的 config.yml，并安全重启避免 STOP_PENDING 卡死
+    // 这里顺手把服务 ImagePath 指向当前用户的 config.yml，并配置网络/DNS 依赖、延迟自启及多次失败自动重启
     const innerScript = [
       `& '${psEsc(bin)}' service install`,
       `if (Test-Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Cloudflared') {`,
       `  Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Cloudflared' -Name ImagePath -Value ('"' + '${psEsc(bin)}' + '" --config "' + '${psEsc(cfg)}' + '" tunnel run')`,
+      `  & sc.exe config Cloudflared start= delayed-auto depend= Tcpip/Dnscache | Out-Null`,
+      `  & sc.exe failure Cloudflared reset= 300 actions= restart/15000/restart/30000/restart/60000 | Out-Null`,
+      `  & sc.exe failureflag Cloudflared 1 | Out-Null`,
       `  Stop-Service Cloudflared -Force -NoWait -ErrorAction SilentlyContinue`,
       `  Start-Sleep -Seconds 2`,
       `  $svcPid = (Get-CimInstance Win32_Service -Filter "Name='Cloudflared'" -ErrorAction SilentlyContinue).ProcessId`,
@@ -902,18 +967,61 @@ export class TunnelWizard {
   }
 
 
+  private clearRestartTimer(): void {
+    if (this.restartTimer !== null) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+  }
+
+  private stopChildProcess(): boolean {
+    if (!this.childRunning()) return false;
+    this.child?.kill();
+    return true;
+  }
+
+  async ensureRunning(hostname = this.savedHostname()): Promise<string | null> {
+    if (this.ensureInFlight) return this.ensureInFlight;
+    const task = (async (): Promise<string | null> => {
+      if (this.manualStop || this.anyJobRunning() || this.childRunning()) {
+        return null;
+      }
+      if (!this.hasLocalConfig(hostname)) {
+        return null;
+      }
+      const svc = await this.detectService();
+      if (svc.state === "running") {
+        return null;
+      }
+      if (await this.deps.probe(hostname)) {
+        return null;
+      }
+      return this.startRun(hostname);
+    })().finally(() => {
+      if (this.ensureInFlight === task) this.ensureInFlight = null;
+    });
+    this.ensureInFlight = task;
+    return task;
+  }
+
   tunnelLogTail(lines = 30): string[] {
     return this.childLog.slice(-lines);
   }
 
   startRun(hostname = this.savedHostname()): string {
+    this.manualStop = false;
+    this.clearRestartTimer();
     if (this.childRunning()) return "隧道已在由本页托管运行中";
     const name = this.tunnelName(hostname);
+    const cfgPath = join(this.cfDir(), "config.yml");
+    const args = existsSync(cfgPath)
+      ? ["tunnel", "--config", cfgPath, "run", name]
+      : ["tunnel", "run", name];
     let child: ChildProcess;
     try {
-      child = spawn(resolveWinBin("cloudflared"), ["tunnel", "run", name], {
-        windowsHide: true,
-      });
+      child = this.deps.spawnTunnel
+        ? this.deps.spawnTunnel(args)
+        : spawn(resolveWinBin("cloudflared"), args, { windowsHide: true });
     } catch (err) {
       throw new Error(
         `拉起隧道失败：${err instanceof Error ? err.message : String(err)}`,
@@ -921,6 +1029,7 @@ export class TunnelWizard {
     }
     this.child = child;
     this.childLog = [];
+    const startedAt = Date.now();
     const push = (d: Buffer) => {
       for (const line of d.toString().split(/\r?\n/)) {
         if (line.trim()) this.childLog.push(line);
@@ -934,13 +1043,25 @@ export class TunnelWizard {
     child.on("close", (code) => {
       this.childLog.push(`[cloudflared 已退出，code=${code ?? "未知"}]`);
       if (this.child === child) this.child = null;
+      if (this.manualStop || !this.hasLocalConfig(hostname)) return;
+      if (Date.now() - startedAt > 30_000) this.restartAttempt = 0;
+      const delayMs = Math.min(30_000, 5_000 * 2 ** this.restartAttempt);
+      this.restartAttempt = Math.min(this.restartAttempt + 1, 3);
+      this.childLog.push(`[将在 ${Math.round(delayMs / 1000)} 秒后自动重连]`);
+      this.clearRestartTimer();
+      this.restartTimer = setTimeout(() => {
+        this.restartTimer = null;
+        void this.ensureRunning(hostname).catch(() => {});
+      }, delayMs);
     });
     return "隧道已拉起（本页托管），稍等几秒后看上方运行状态";
   }
 
   stopRun(): string {
-    if (!this.childRunning()) return "当前没有由本页托管的隧道进程";
-    this.child?.kill();
+    this.manualStop = true;
+    this.clearRestartTimer();
+    this.restartAttempt = 0;
+    if (!this.stopChildProcess()) return "当前没有由本页托管的隧道进程";
     return "已停止本页托管的隧道进程";
   }
 }

@@ -7,9 +7,12 @@
 // 数据根指向临时目录，与真实 ./data 隔离
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
+import type { ChildProcess } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -383,5 +386,110 @@ describe("防呆加固：多机隧道名、小写 JSON、防假绿与 530 识别
     expect(s.e2e.ok).toBe(false);
     expect(s.e2e.needsDnsOverwrite).toBe(true);
     expect(s.dns.state).toBe("mismatch");
+  });
+
+  test("530 + Error 1033 识别为隧道未启动，不误降级 DNS 为 mismatch", async () => {
+    expect(
+      tunnel.parseCloudflareErrorCode(
+        '<script>errorCode: 1033</script><span>1033</span>',
+      ),
+    ).toBe(1033);
+    expect(tunnel.parseCloudflareErrorCode("Error 1016 Origin DNS Error")).toBe(
+      1016,
+    );
+    expect(tunnel.parseCloudflareErrorCode("ok")).toBe(null);
+
+    const w = new TunnelWizard(
+      fakeDeps({
+        platform: () => "win32",
+        exec: async (cmd, args) => {
+          if (cmd === "sc" && args[0] === "query") {
+            return { code: 0, out: "STATE              : 1  STOPPED", err: "" };
+          }
+          if (args[0] === "tunnel" && args[1] === "list") {
+            return {
+              code: 0,
+              out: JSON.stringify([{ id: FAKE_ID, name: "yoyo-bridge" }]),
+              err: "",
+            };
+          }
+          return { code: 0, out: "cloudflared version 2026.11.1", err: "" };
+        },
+        resolveDns: async () => ({
+          cname: [`${FAKE_ID}.cfargotunnel.com`],
+          a: [],
+          aaaa: [],
+        }),
+        probeDetail: async () => ({ status: 530, cfErrorCode: 1033 }),
+      }),
+    );
+    const s = await w.status("yoyo-bridge.ck971.cc.cd", "tok");
+    expect(s.e2e.httpStatus).toBe(530);
+    expect(s.e2e.needsDnsOverwrite).toBe(false);
+    expect(s.dns.state).toBe("created");
+  });
+
+  test("ensureRunning：未配置跳过；服务停止时自动拉起；手动 stopRun 后不自动重启", async () => {
+    let spawnCount = 0;
+    const makeFakeChild = () => {
+      const ee = new EventEmitter() as ChildProcess & {
+        exitCode: number | null;
+        kill: () => boolean;
+      };
+      ee.exitCode = null;
+      ee.kill = () => {
+        ee.exitCode = 0;
+        ee.emit("close", 0);
+        return true;
+      };
+      return ee;
+    };
+
+    const deps = fakeDeps({
+      platform: () => "win32",
+      exec: async (cmd, args) => {
+        if (cmd === "sc" && args[0] === "query") {
+          return { code: 0, out: "STATE              : 1  STOPPED", err: "" };
+        }
+        return { code: 0, out: "", err: "" };
+      },
+      spawnTunnel: () => {
+        spawnCount += 1;
+        return makeFakeChild();
+      },
+    });
+    const w = new TunnelWizard(deps);
+
+    // 未配置 config.yml 时不拉起
+    expect(await w.ensureRunning("yoyo-bridge.ck971.cc.cd")).toBe(null);
+    expect(spawnCount).toBe(0);
+
+    // 写入 config.yml + 凭据 json 后自动拉起
+    const cfDir = join(deps.homeDir(), ".cloudflared");
+    mkdirSync(cfDir, { recursive: true });
+    writeFileSync(join(cfDir, `${FAKE_ID}.json`), "{}", "utf8");
+    writeFileSync(
+      join(cfDir, "config.yml"),
+      buildConfigYml({
+        tunnelId: FAKE_ID,
+        hostname: "yoyo-bridge.ck971.cc.cd",
+        credentialsFile: join(cfDir, `${FAKE_ID}.json`),
+      }),
+      "utf8",
+    );
+
+    const msg = await w.ensureRunning("yoyo-bridge.ck971.cc.cd");
+    expect(msg).toContain("已拉起");
+    expect(spawnCount).toBe(1);
+
+    // 正在运行时不重复拉起
+    expect(await w.ensureRunning("yoyo-bridge.ck971.cc.cd")).toBe(null);
+    expect(spawnCount).toBe(1);
+
+    // 用户显式停止后不再自动拉起
+    w.stopRun();
+    expect(w.isManuallyStopped()).toBe(true);
+    expect(await w.ensureRunning("yoyo-bridge.ck971.cc.cd")).toBe(null);
+    expect(spawnCount).toBe(1);
   });
 });

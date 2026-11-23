@@ -117,3 +117,12 @@ export function parseServiceState(out: string): "running" | "stopped" | "absent"
   if (/STATE\s*:/i.test(out)) return "stopped";
   return "absent";
 }
+
+/** 从 Cloudflare 530 错误页提取错误码（1033=隧道未连上边缘，1016=Origin DNS 错误）。 */
+export function parseCloudflareErrorCode(body: string): number | null {
+  const m =
+    body.match(/errorCode\s*:\s*(\d{4})\b/) ??
+    body.match(/data-translate="error"[^>]*>[^<]*<\/span>\s*<span>(\d{4})<\/span>/i) ??
+    body.match(/\bError\s+(\d{4})\b/i);
+  return m ? Number(m[1]) : null;
+}

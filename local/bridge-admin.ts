@@ -453,13 +453,29 @@ async function renderList(deps: Deps, notice = ""): Promise<Response> {
   const activeProfile =
     eff.profiles.find((p) => p.id === eff.activeProfileId) ?? null;
   const tStatus = await tunnelWizard.status(hostname, activeProfile?.token ?? null);
+  let autoHealNotice = "";
+  if (
+    tStatus.tunnel.ok &&
+    tStatus.config.ok &&
+    !tStatus.running.ok &&
+    tStatus.service.state !== "running" &&
+    !tunnelWizard.anyJobRunning() &&
+    !tunnelWizard.isManuallyStopped()
+  ) {
+    void tunnelWizard.ensureRunning(hostname).catch(() => {});
+    autoHealNotice = `<div class="banner">检测到本地隧道未运行，正在后台自动重连，页面将自动刷新…</div>`;
+  }
   const tunnelHtml = tunnelSection(tStatus, hostname, activeProfile?.label ?? null);
-  const busy = tunnelWizard.anyJobRunning() || tunnelWizard.childRunning();
+  const busy =
+    tunnelWizard.anyJobRunning() ||
+    (tunnelWizard.childRunning() && !tStatus.e2e.ok) ||
+    tunnelWizard.isHealing() ||
+    autoHealNotice !== "";
   const body = `
 <h1>桥账号管理 · 多账号手动切换</h1>
 <p class="muted">本地可保存多个 Muse 账号的桥配置，手动选一个为当前账号。只有当前账号的桥能领新任务；其余账号的桥来拉任务时拿到空列表、安静空转。?切换时若有任务在途，原桥仍可把结果送回来（结果/失败/参考文件对任何已配对账号放行）。</p>
 <p>桥任务现状：排队中 ${counts.queued} 个 · 在途（已领走未回送） ${counts.claimed} 个。</p>
-${notice}
+${notice}${autoHealNotice}
 ${envBanner}
 <h2>账号档案：${file.profiles.length} 个）</h2>
 ${file.profiles.length === 0

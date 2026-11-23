@@ -19,6 +19,7 @@ import { handleBridgeAdmin } from "./bridge-admin";
 import { CLIENT_DIST, HOST, PORT } from "./config";
 import { createCtx } from "./ctx";
 import { openDb } from "./db";
+import { tunnelWizard } from "./tunnel";
 
 const { db } = openDb();
 await ensureBridgeJobsTable(db as unknown as Db);
@@ -150,3 +151,13 @@ const server = Bun.serve({
 
 console.log(`YoYo画布本地版已启动：http://${HOST}:${server.port}`);
 console.log(`数据目录：${process.env.YOYO_LOCAL_ROOT}`);
+
+process.on("exit", () => tunnelWizard.stopRun());
+void tunnelWizard
+  .ensureRunning()
+  .then((msg) => {
+    if (msg) console.log(`[tunnel] ${msg}`);
+  })
+  .catch((err) => {
+    console.warn("[tunnel] 自动拉起隧道失败：", err);
+  });
