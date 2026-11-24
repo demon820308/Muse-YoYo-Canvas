@@ -12,6 +12,7 @@ useRef,
 useState,
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { api } from "./api";
 import { useProjectActions } from "./hooks/use-project-actions";
 import { useProjectSync } from "./hooks/use-project-sync";
 import { useWorkspaceUi } from "./hooks/use-workspace-ui";
@@ -24,7 +25,15 @@ import {
   type CreateMenuState,
 } from "./hooks/use-canvas-gestures";
 import { useGeneration } from "./hooks/use-generation";
-import { useNodeOps } from "./hooks/use-node-ops";
+import { NODE_DEFAULTS, newId, useNodeOps } from "./hooks/use-node-ops";
+import { applyGroupSelection, getGroupWrapRect } from "./canvas-geometry";
+import { IconQueue } from "./icons";
+import {
+  AgentDrawer,
+  type AgentOperation,
+  type ApplyAgentOpsResult,
+} from "./components/AgentDrawer";
+import { AgentOrbIcon } from "./components/AgentOrbIcon";
 import { CanvasMenusAndQueue } from "./components/CanvasMenusAndQueue";
 import {
 type CanvasTool,
@@ -35,6 +44,7 @@ import {
 } from "./app-helpers";
 import { useToolbarActions } from "./hooks/use-toolbar-actions";
 import { AppDialogs } from "./components/AppDialogs";
+import { BridgeSetupModal, type BridgeSummary } from "./components/BridgeSetupModal";
 import { AppCanvasWorkspace } from "./components/AppCanvasWorkspace";
 import { TopProjectBar } from "./components/TopProjectBar";
 import { type PreviewTarget } from "./components/MediaPreviewDialog";
@@ -91,6 +101,40 @@ export function App() {
   // independent and keep working with the mode off.
   const [multiSelectMode, setMultiSelectMode] = useState(false);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const [bridgeModalOpen, setBridgeModalOpen] = useState(false);
+  const [bridgeSummary, setBridgeSummary] = useState<BridgeSummary | null>(null);
+  const [bridgeSummaryTimeout, setBridgeSummaryTimeout] = useState(false);
+  const [agentOpen, setAgentOpen] = useState(false);
+  const [agentBusy, setAgentBusy] = useState(false);
+
+  const refreshBridgeSummary = useCallback(async () => {
+    try {
+      const res = await fetch("/bridge-admin/api/summary", {
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) {
+        setBridgeSummaryTimeout(true);
+        return;
+      }
+      const json = (await res.json()) as BridgeSummary;
+      setBridgeSummary(json);
+      setBridgeSummaryTimeout(false);
+    } catch {
+      setBridgeSummaryTimeout(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshBridgeSummary();
+  }, [refreshBridgeSummary]);
+
+  useEffect(() => {
+    const intervalMs = bridgeSummary?.state === "connecting" ? 2_000 : 15_000;
+    const timer = window.setInterval(() => {
+      void refreshBridgeSummary();
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [bridgeSummary?.state, refreshBridgeSummary]);
 
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const projectIdRef = useRef<string | null>(null);
@@ -441,6 +485,330 @@ export function App() {
 
   const projects = projectsQ.data?.projects ?? [];
   const currentProject = projects.find((p) => p.id === projectId) ?? null;
+
+  const highlightAgentNode = useCallback(
+    (id: string) => {
+      const node = nodesRef.current.find((n) => n.id === id);
+      const el = canvasRef.current;
+      if (!node || !el) return;
+      setEditorSuppressed(id);
+      const rect = el.getBoundingClientRect();
+      const zoom = viewportRef.current.zoom;
+      const drawerOffset = agentOpen ? Math.min(200, rect.width * 0.22) : 0;
+      applyViewport({
+        x: (rect.width - drawerOffset) / 2 - (node.x + node.width / 2) * zoom,
+        y: rect.height / 2 - (node.y + node.height / 2) * zoom,
+        zoom,
+      });
+      setFlashId(id);
+      window.setTimeout(() => setFlashId((cur) => (cur === id ? null : cur)), 2500);
+    },
+    [agentOpen, applyViewport, canvasRef, nodesRef, setEditorSuppressed, setFlashId, viewportRef],
+  );
+
+  const triggerGenerateNodes = useCallback(
+    async (nodeIds: string[]) => {
+      if (nodeIds[0]) {
+        highlightAgentNode(nodeIds[0]);
+      }
+      for (const id of nodeIds) {
+        const node = nodesRef.current.find((n) => n.id === id);
+        if (node) {
+          await runGeneration(node);
+        }
+      }
+    },
+    [highlightAgentNode, nodesRef, runGeneration],
+  );
+
+  const applyAgentOperations = useCallback(
+    async (
+      ops: AgentOperation[],
+      options: { autoTriggerGenerate: boolean },
+    ): Promise<ApplyAgentOpsResult> => {
+      const pid = projectIdRef.current;
+      if (!pid) return { summary: "无当前项目", deferredGenerateNodeIds: [] };
+
+      let nextNodes = [...nodesRef.current];
+      let nextEdges = [...edgesRef.current];
+      const tempToReal = new Map<string, string>();
+      let created = 0;
+      let inserted = 0;
+      let updated = 0;
+      let deleted = 0;
+      let connected = 0;
+      let disconnected = 0;
+      let grouped = 0;
+      let savedPrompts = 0;
+      const genIds: string[] = [];
+
+      const resolveNodeId = (raw?: string): string | undefined => {
+        if (!raw) return undefined;
+        return tempToReal.get(raw) ?? raw;
+      };
+
+      const vp = viewportRef.current;
+      const baseX = (-vp.x + 220) / Math.max(0.2, vp.zoom);
+      const baseY = (-vp.y + 180) / Math.max(0.2, vp.zoom);
+
+      for (const op of ops) {
+        if (op.op === "insert_asset" && op.assetId) {
+          const nearId = resolveNodeId(op.nearNodeId);
+          const nearNode = nearId
+            ? nextNodes.find((n) => n.id === nearId)
+            : undefined;
+          const x =
+            typeof op.x === "number"
+              ? op.x
+              : nearNode
+                ? nearNode.x + nearNode.width + 80
+                : baseX + (created + inserted) * 290;
+          const y =
+            typeof op.y === "number"
+              ? op.y
+              : nearNode
+                ? nearNode.y + ((created + inserted) % 2) * 30
+                : baseY;
+          try {
+            const res = await api.insertAssetToCanvas({
+              projectId: pid,
+              assetId: op.assetId,
+              x,
+              y,
+            });
+            const insertedNode =
+              op.title && op.title.trim()
+                ? { ...res.node, title: op.title.trim() }
+                : res.node;
+            nextNodes.push(insertedNode);
+            if (op.tempId) tempToReal.set(op.tempId, insertedNode.id);
+            inserted += 1;
+          } catch (err) {
+            const cachedAssets = queryClient.getQueryData<{ assets: Asset[] }>([
+              "assets",
+              pid,
+            ]);
+            const asset = cachedAssets?.assets.find((a) => a.id === op.assetId);
+            if (asset && asset.kind === "text") {
+              const defaults = NODE_DEFAULTS.text;
+              const built = buildNode({
+                type: "text",
+                title: op.title ?? asset.title ?? defaults.title,
+                width: defaults.w,
+                height: defaults.h,
+                content: asset.content ?? "",
+                prompt: asset.content ?? "",
+                status: "idle",
+                hidden: false,
+                groupId: null,
+                color: null,
+                x,
+                y,
+              });
+              if (built) {
+                nextNodes.push(built);
+                if (op.tempId) tempToReal.set(op.tempId, built.id);
+                inserted += 1;
+              }
+            } else {
+              showToast(
+                `插入资产失败：${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+        } else if (op.op === "create_node") {
+          const nearId = resolveNodeId(op.nearNodeId);
+          const nearNode = nearId
+            ? nextNodes.find((n) => n.id === nearId)
+            : undefined;
+          const x =
+            typeof op.x === "number"
+              ? op.x
+              : nearNode
+                ? nearNode.x + nearNode.width + 80
+                : baseX + (created + inserted) * 290;
+          const y =
+            typeof op.y === "number"
+              ? op.y
+              : nearNode
+                ? nearNode.y + ((created + inserted) % 2) * 30
+                : baseY;
+          const nodeType = op.type ?? "text";
+          const defaults = NODE_DEFAULTS[nodeType];
+          const built = buildNode({
+            type: nodeType,
+            title: op.title ?? defaults.title,
+            width: defaults.w,
+            height: defaults.h,
+            content: op.content ?? "",
+            prompt: op.prompt ?? "",
+            status: "idle",
+            hidden: false,
+            groupId: null,
+            color: null,
+            ...(op.genRatio !== undefined ? { genRatio: op.genRatio } : {}),
+            ...(op.genDuration !== undefined ? { genDuration: op.genDuration } : {}),
+            ...(op.genMode !== undefined ? { genMode: op.genMode } : {}),
+            x,
+            y,
+          });
+          if (built) {
+            nextNodes.push(built);
+            if (op.tempId) tempToReal.set(op.tempId, built.id);
+            created += 1;
+          }
+        } else if (op.op === "update_node") {
+          const targetId = resolveNodeId(op.nodeId);
+          if (!targetId) continue;
+          let hit = false;
+          nextNodes = nextNodes.map((n) => {
+            if (n.id !== targetId) return n;
+            hit = true;
+            return {
+              ...n,
+              ...(op.title !== undefined ? { title: op.title } : {}),
+              ...(op.prompt !== undefined ? { prompt: op.prompt } : {}),
+              ...(op.content !== undefined ? { content: op.content } : {}),
+              ...(op.genRatio !== undefined ? { genRatio: op.genRatio } : {}),
+              ...(op.genDuration !== undefined ? { genDuration: op.genDuration } : {}),
+            };
+          });
+          if (hit) updated += 1;
+        } else if (op.op === "delete_node") {
+          const targetId = resolveNodeId(op.nodeId);
+          if (!targetId) continue;
+          const before = nextNodes.length;
+          nextNodes = nextNodes.filter((n) => n.id !== targetId);
+          nextEdges = nextEdges.filter(
+            (e) => e.fromNodeId !== targetId && e.toNodeId !== targetId,
+          );
+          if (nextNodes.length < before) deleted += 1;
+        } else if (op.op === "connect") {
+          const fromNodeId = resolveNodeId(op.source);
+          const toNodeId = resolveNodeId(op.target);
+          if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) continue;
+          const exists = nextEdges.some(
+            (e) => e.fromNodeId === fromNodeId && e.toNodeId === toNodeId,
+          );
+          if (!exists) {
+            nextEdges.push({
+              id: newId(),
+              projectId: pid,
+              fromNodeId,
+              toNodeId,
+            });
+            connected += 1;
+          }
+        } else if (op.op === "disconnect") {
+          const fromNodeId = resolveNodeId(op.source);
+          const toNodeId = resolveNodeId(op.target);
+          if (!fromNodeId || !toNodeId) continue;
+          const before = nextEdges.length;
+          nextEdges = nextEdges.filter(
+            (e) => !(e.fromNodeId === fromNodeId && e.toNodeId === toNodeId),
+          );
+          if (nextEdges.length < before) disconnected += 1;
+        } else if (op.op === "trigger_generate") {
+          const targetId = resolveNodeId(op.nodeId);
+          if (targetId && !genIds.includes(targetId)) {
+            genIds.push(targetId);
+          }
+        } else if (op.op === "group_nodes" && Array.isArray(op.nodeIds)) {
+          const resolvedIds = new Set(
+            op.nodeIds.map((id) => resolveNodeId(id)).filter((id): id is string => Boolean(id)),
+          );
+          const members = nextNodes.filter((n) => resolvedIds.has(n.id) && n.type !== "group");
+          if (members.length >= 2) {
+            const rect = getGroupWrapRect(members);
+            const groupNode = buildNode({
+              type: "group",
+              title: op.title || "Agent 分组",
+              width: rect.width,
+              height: rect.height,
+              content: "",
+              prompt: "",
+              status: "idle",
+              hidden: false,
+              groupId: null,
+              color: null,
+              x: rect.x,
+              y: rect.y,
+            });
+            if (groupNode) {
+              const res = applyGroupSelection(resolvedIds, nextNodes, groupNode);
+              if (res) {
+                nextNodes = res.nodes;
+                nextEdges = nextEdges.filter(
+                  (e) => !res.removedIds.has(e.fromNodeId) && !res.removedIds.has(e.toNodeId),
+                );
+                grouped += 1;
+              }
+            }
+          }
+        } else if (op.op === "save_prompt" && op.title && op.content) {
+          try {
+            await api.addPrompt({
+              title: op.title.slice(0, 120),
+              content: op.content,
+            });
+            void queryClient.invalidateQueries({ queryKey: ["prompts"] });
+            savedPrompts += 1;
+          } catch {
+            // ignore prompt save error
+          }
+        }
+      }
+
+      if (created || inserted || updated || deleted || connected || disconnected || grouped) {
+        applyGraph(nextNodes, nextEdges);
+        await flushSave();
+      }
+      const focusTargetId =
+        genIds[0] ?? nextNodes[nextNodes.length - 1]?.id ?? null;
+      if ((created || inserted || updated) && focusTargetId) {
+        requestAnimationFrame(() => highlightAgentNode(focusTargetId));
+      }
+
+      let triggered = 0;
+      const deferred: string[] = [];
+      if (genIds.length > 0) {
+        if (options.autoTriggerGenerate) {
+          await triggerGenerateNodes(genIds);
+          triggered = genIds.length;
+        } else {
+          deferred.push(...genIds);
+        }
+      }
+
+      const parts: string[] = [];
+      if (inserted) parts.push(`插入 ${inserted} 个资产`);
+      if (created) parts.push(`新建 ${created} 个节点`);
+      if (updated) parts.push(`更新 ${updated} 个节点`);
+      if (deleted) parts.push(`删除 ${deleted} 个节点`);
+      if (connected) parts.push(`连线 ${connected} 条`);
+      if (disconnected) parts.push(`断开 ${disconnected} 条`);
+      if (grouped) parts.push(`分组 ${grouped} 个`);
+      if (savedPrompts) parts.push(`存入提示词库 ${savedPrompts} 条`);
+      if (triggered) parts.push(`已触发 ${triggered} 个生成`);
+      return {
+        summary: parts.join("、") || "无画布变更",
+        deferredGenerateNodeIds: deferred,
+      };
+    },
+    [
+      applyGraph,
+      buildNode,
+      edgesRef,
+      flushSave,
+      highlightAgentNode,
+      nodesRef,
+      projectIdRef,
+      queryClient,
+      showToast,
+      triggerGenerateNodes,
+      viewportRef,
+    ],
+  );
   const composerRect =
     composerNodeId && canvasSize.width > 0 ? canvasRef.current?.getBoundingClientRect() : undefined;
   const view = computeAppViewState({
@@ -491,9 +859,6 @@ export function App() {
           overlay above this header, so the cluster stays put. The
           right queue button never moves.) */}
       <TopProjectBar
-        panelOpen={panelOpen}
-        setPanelOpen={setPanelOpen}
-        panelWidth={panelWidth}
         projectMenuRef={projectMenuRef}
         projectMenuOpen={projectMenuOpen}
         setProjectMenuOpen={setProjectMenuOpen}
@@ -510,8 +875,9 @@ export function App() {
         projects={projects}
         projectId={projectId}
         switchProject={switchProject}
-        openQueue={() => setQueueOpen(true)}
-        queueCount={queueQ.data?.requests.length ?? 0}
+        bridgeSummary={bridgeSummary}
+        bridgeSummaryTimeout={bridgeSummaryTimeout}
+        onOpenBridgeModal={() => setBridgeModalOpen(true)}
         importReport={importReport}
         dismissImportReport={() => setImportReport(null)}
       />
@@ -618,6 +984,70 @@ export function App() {
         addConnection={addConnection}
       />
 
+      {!queueOpen && !agentOpen && !keyboardUp ? (
+        <div
+          data-ui
+          data-canvas-no-zoom
+          onPointerDown={(e) => e.stopPropagation()}
+          className="safe-bottom-offset fixed bottom-3 right-3 z-40 flex items-center gap-2"
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setQueueOpen(false);
+              setAgentOpen(true);
+            }}
+            className="capsule-chrome capsule-btn group flex h-10 items-center gap-2 rounded-full pl-2 pr-3.5 text-xs font-medium text-[var(--text)]"
+            aria-label="打开画布 Agent"
+            title="打开画布 Agent（支持 Muse / OpenAI / Anthropic）"
+          >
+            <AgentOrbIcon
+              size={24}
+              thinking={agentBusy}
+              className="transition-transform duration-150 group-hover:scale-105"
+            />
+            <span>Agent</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setAgentOpen(false);
+              setQueueOpen(true);
+            }}
+            className="capsule-chrome capsule-btn group flex h-10 items-center gap-2 rounded-full px-3.5 text-xs font-medium text-[var(--text)]"
+            aria-label="打开生成队列"
+          >
+            {(queueQ.data?.requests.length ?? 0) > 0 ? (
+              <span className="h-2 w-2 animate-pulse rounded-full bg-[var(--accent)] transition-transform duration-150 group-hover:scale-125" aria-hidden="true" />
+            ) : (
+              <IconQueue size={15} className="text-[var(--dim)] transition-colors duration-150 group-hover:text-[var(--text)]" />
+            )}
+            <span>生成队列</span>
+            {(queueQ.data?.requests.length ?? 0) > 0 ? (
+              <span className="grid h-5 min-w-5 place-items-center rounded-full bg-[var(--text)] px-1.5 text-[11px] font-semibold leading-none text-[var(--bg)] tabular-nums transition-transform duration-150 group-hover:scale-105">
+                {queueQ.data?.requests.length}
+              </span>
+            ) : null}
+          </button>
+        </div>
+      ) : null}
+
+      <AgentDrawer
+        open={agentOpen}
+        width={panelWidth}
+        onClose={() => setAgentOpen(false)}
+        projectId={projectId}
+        nodes={nodes}
+        edges={edges}
+        selectedIds={selectedIds}
+        onApplyOperations={applyAgentOperations}
+        onTriggerGenerateNodes={triggerGenerateNodes}
+        onLocateNode={(id) => highlightAgentNode(id)}
+        showToast={showToast}
+        onBusyChange={setAgentBusy}
+      />
+
       <CanvasMenusAndQueue
         contextMenu={contextMenu}
         setContextMenu={setContextMenu}
@@ -639,6 +1069,7 @@ export function App() {
         setTapConnect={setTapConnect}
         tapConnectRef={tapConnectRef}
         queueOpen={queueOpen}
+        queueWidth={panelWidth}
         closeQueue={() => setQueueOpen(false)}
         projectId={projectId}
         requests={queueQ.data?.requests ?? []}
@@ -690,6 +1121,13 @@ export function App() {
         onAngleConfirm={(n, params) => void handleAngleConfirm(n, params)}
         onMaskConfirm={(n, payload) => void handleMaskConfirm(n, payload)}
         toast={toast}
+      />
+
+      <BridgeSetupModal
+        open={bridgeModalOpen}
+        onClose={() => setBridgeModalOpen(false)}
+        onSummaryChange={() => void refreshBridgeSummary()}
+        showToast={showToast}
       />
     </div>
   );

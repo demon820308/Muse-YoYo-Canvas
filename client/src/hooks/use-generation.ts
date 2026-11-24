@@ -365,6 +365,41 @@ const runTool = useCallback(
   [beginRunFeedback, flushSave, queryClient, refreshGraphFromServer, settleRunFeedback, showToast],
 );
 
+/** Clear local run-feedback and node running status immediately when a
+ * node's run is stopped/cancelled, without waiting for the next graph
+ * poll. */
+const clearStoppedNode = useCallback(
+  (nodeId: string) => {
+    inFlightRunsRef.current.delete(nodeId);
+    clearRunFeedback(nodeId);
+    setGenBusyId((cur) => (cur === nodeId ? null : cur));
+    setDirectGenId((cur) => (cur === nodeId ? null : cur));
+    const cur = nodesRef.current;
+    if (
+      cur.some(
+        (n) =>
+          n.id === nodeId &&
+          (n.genStatus === "queued" || n.genStatus === "working"),
+      )
+    ) {
+      const next = cur.map((n) =>
+        n.id === nodeId
+          ? {
+              ...n,
+              genStatus: "idle" as const,
+              genError: null,
+              genStartedAt: null,
+              status: "idle" as const,
+            }
+          : n,
+      );
+      nodesRef.current = next;
+      setNodes(next);
+    }
+  },
+  [clearRunFeedback, nodesRef, setNodes],
+);
+
 /** The config card's 停止 button: dequeues / un-claims the run
  * server-side; a background task that still finishes afterwards is
  * refused by the delivery guard, so nothing lands after a stop. */
@@ -380,12 +415,11 @@ const stopGeneration = useCallback(
     } finally {
       // A stopped run gets no settle flash — its feedback record
       // and in-flight guard simply clear.
-      inFlightRunsRef.current.delete(node.id);
-      clearRunFeedback(node.id);
+      clearStoppedNode(node.id);
       void refreshGraphFromServer();
     }
   },
-  [clearRunFeedback, refreshGraphFromServer, showToast],
+  [clearStoppedNode, refreshGraphFromServer, showToast],
 );
 
 const queueQ = useQuery({
@@ -414,7 +448,10 @@ const stopRequestMut = useMutation({
     showToast("已停止生");
     queryClient.invalidateQueries({ queryKey: ["generation-requests"] });
     queryClient.invalidateQueries({ queryKey: ["generation-records"] });
-    if (args.projectId === projectIdRef.current) void refreshGraphFromServer();
+    if (args.projectId === projectIdRef.current) {
+      clearStoppedNode(args.nodeId);
+      void refreshGraphFromServer();
+    }
   },
   onError: () => showToast("停止失败，请稍后重试"),
 });
@@ -516,6 +553,13 @@ useEffect(() => {
     const before = prev.get(n.id);
     prev.set(n.id, n.genStatus);
     if (before === n.genStatus) continue;
+    if ((before === "queued" || before === "working") && n.genStatus === "idle") {
+      inFlightRunsRef.current.delete(n.id);
+      if (runFeedbackRef.current[n.id]?.activeKey) {
+        clearRunFeedback(n.id);
+      }
+      continue;
+    }
     if (n.genStatus !== "done" && n.genStatus !== "failed") continue;
     if (before !== undefined && n.genStatus === "done") {
       anySettledDone = true;
@@ -527,7 +571,7 @@ useEffect(() => {
   if (anySettledDone) {
     void queryClient.invalidateQueries({ queryKey: ["assets"] });
   }
-}, [nodes, queryClient, settleRunFeedback]);
+}, [clearRunFeedback, nodes, queryClient, settleRunFeedback]);
 
 // Kick the queue consumer whenever the queued set changes (the
 // per-minute external schedule is the backstop, not the only driver).

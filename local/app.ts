@@ -14,6 +14,7 @@ import { Actions } from "../server/src/actions";
 import { ensureBridgeJobsTable } from "../server/src/actions/bridge-jobs";
 import type { Db } from "../server/src/actions/contracts";
 import { readBlobBytes } from "./blobs";
+import { handleAgent } from "./agent";
 import { handleBridge } from "./bridge";
 import { handleBridgeAdmin } from "./bridge-admin";
 import { CLIENT_DIST, HOST, PORT } from "./config";
@@ -111,6 +112,7 @@ function serveStatic(pathname: string): Response {
 const server = Bun.serve({
   hostname: HOST,
   port: PORT,
+  maxRequestBodySize: 512 * 1024 * 1024,
   async fetch(req) {
     const url = new URL(req.url);
     if (url.pathname === "/healthz") {
@@ -118,6 +120,9 @@ const server = Bun.serve({
     }
     if (url.pathname.startsWith("/bridge/")) {
       return handleBridge(req, url, { db, ctx });
+    }
+    if (url.pathname.startsWith("/agent/")) {
+      return handleAgent(req, url, { db: db as unknown as Db });
     }
     if (
       url.pathname === "/bridge-admin" ||

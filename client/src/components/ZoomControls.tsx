@@ -29,25 +29,27 @@ export function ZoomControls({
     <div
       data-ui
       data-canvas-no-zoom
-      className="absolute bottom-[4.5rem] left-3 z-40 xl:bottom-3"
+      className="w-full"
       onPointerDown={(e) => e.stopPropagation()}
     >
-      <div className="capsule-chrome flex h-11 items-center gap-1 rounded-full px-2.5">
+      <div className="capsule-chrome flex h-10 w-full items-center gap-0.5 rounded-full px-1.5">
         <button
           type="button"
-          className="hit-40 grid h-8 w-8 place-items-center rounded-full text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
           onClick={onFit}
           aria-label="适配全图"
+          title="适应屏幕"
         >
-          <IconFocus size={16} />
+          <IconFocus size={15} />
         </button>
         <button
           type="button"
-          className="hit-40 grid h-8 w-8 place-items-center rounded-full text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
           onClick={() => onScaleChange(scale / 1.2)}
           aria-label="缩小画布"
+          title="缩小"
         >
-          <IconMinus size={15} />
+          <IconMinus size={14} />
         </button>
         <label className="sr-only" htmlFor="canvas-zoom-slider">
           放大/缩小画布
@@ -59,23 +61,24 @@ export function ZoomControls({
           max="500"
           step="1"
           value={percent}
-          className="w-14 sm:w-20"
+          className="h-1 min-w-0 flex-1 cursor-pointer accent-[var(--text)]"
           onChange={(event) => onScaleChange(Number(event.target.value) / 100)}
           aria-label="放大/缩小画布"
         />
         <span
-          className="w-11 text-center text-xs tabular-nums text-[var(--dim)]"
+          className="w-9 shrink-0 text-center text-[11px] tabular-nums text-[var(--dim)]"
           aria-live="polite"
         >
           {percent}%
         </span>
         <button
           type="button"
-          className="hit-40 grid h-8 w-8 place-items-center rounded-full text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
           onClick={() => onScaleChange(scale * 1.2)}
           aria-label="放大画布"
+          title="放大"
         >
-          <IconPlus size={15} />
+          <IconPlus size={14} />
         </button>
       </div>
     </div>

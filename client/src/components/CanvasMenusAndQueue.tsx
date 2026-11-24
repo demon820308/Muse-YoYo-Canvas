@@ -34,6 +34,7 @@ export function CanvasMenusAndQueue(props: {
   setTapConnect: (v: { nodeId: string; handleType: "source" | "target" } | null) => void;
   tapConnectRef: MutableRefObject<{ nodeId: string; handleType: "source" | "target" } | null>;
   queueOpen: boolean;
+  queueWidth?: number;
   closeQueue: () => void;
   projectId: string | null;
   requests: QueueRequest[];
@@ -69,6 +70,7 @@ export function CanvasMenusAndQueue(props: {
     setTapConnect,
     tapConnectRef,
     queueOpen,
+    queueWidth,
     closeQueue,
     projectId,
     requests,
@@ -144,6 +146,7 @@ export function CanvasMenusAndQueue(props: {
       {queueOpen ? (
         <QueueDrawer
           currentProjectId={projectId}
+          width={queueWidth}
           requests={requests}
           queueLoading={queueLoading}
           records={records}

@@ -192,11 +192,18 @@ export function CanvasToolbar({
         setTipX(anchorX(e));
       }}
       onMouseLeave={() => setHovered(null)}
-      className="hit-40 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors disabled:opacity-35"
+      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-35"
       style={{
-        color: opts.danger ? "var(--danger)" : "var(--text)",
-        background:
-          opts.active || hovered === id ? "var(--hover-strong)" : "transparent",
+        color: opts.danger
+          ? "var(--danger)"
+          : opts.active
+            ? "var(--bg)"
+            : "var(--text)",
+        background: opts.active
+          ? "var(--text)"
+          : hovered === id
+            ? "var(--hover-strong)"
+            : "transparent",
       }}
     >
       {opts.children}
@@ -204,7 +211,7 @@ export function CanvasToolbar({
   );
 
   const divider = (key: string) => (
-    <span key={key} className="mx-1 h-6 w-px shrink-0 bg-[var(--border)]" />
+    <span key={key} className="mx-1 h-4 w-px shrink-0 bg-[var(--border)]" />
   );
 
   const addBtn = (type: NodeType, label: string, icon: ReactNode) =>
@@ -234,7 +241,7 @@ export function CanvasToolbar({
           </span>
         ) : null}
         <div
-          className="capsule-chrome flex max-w-[calc(100vw-16px)] flex-nowrap items-center gap-0.5 overflow-x-auto rounded-2xl px-2 py-2"
+          className="capsule-chrome flex max-w-[calc(100vw-16px)] flex-nowrap items-center gap-0.5 overflow-x-auto rounded-full px-1.5 py-1"
           role="toolbar"
           aria-label="画布工具条"
         >

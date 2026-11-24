@@ -20,9 +20,9 @@ IconPlay,
 export type HoverPreviewData = {
   title: string;
   kind: "image" | "video";
-  /** Image URL for image rows; unused for video rows. */
+  /** Image URL for image rows, or video URL fallback when poster is missing. */
   src: string | null;
-  /** Poster URL for video rows (may be null — placeholder tile). */
+  /** Poster URL for video rows (may be null — falls back to video frame or placeholder). */
   poster: string | null;
   natW?: number;
   natH?: number;
@@ -44,7 +44,7 @@ export function HoverMediaPreview({
     if (data) setShown(data);
   }, [data]);
   const mediaKey = shown
-    ? `${shown.kind}:${shown.kind === "video" ? (shown.poster ?? "") : (shown.src ?? "")}`
+    ? `${shown.kind}:${shown.kind === "video" ? (shown.poster ?? shown.src ?? "") : (shown.src ?? "")}`
     : "";
   const [measured, setMeasured] = useState<{ w: number; h: number } | null>(
     null,
@@ -121,6 +121,23 @@ export function HoverMediaPreview({
                   h: e.currentTarget.naturalHeight,
                 })
               }
+              draggable={false}
+            />
+          ) : shown.src ? (
+            <video
+              src={`${shown.src}#t=0.1`}
+              muted
+              playsInline
+              preload="metadata"
+              style={{ ...fitStyle, background: "#000" }}
+              onLoadedMetadata={(e) => {
+                if (e.currentTarget.videoWidth && e.currentTarget.videoHeight) {
+                  setMeasured({
+                    w: e.currentTarget.videoWidth,
+                    h: e.currentTarget.videoHeight,
+                  });
+                }
+              }}
               draggable={false}
             />
           ) : (

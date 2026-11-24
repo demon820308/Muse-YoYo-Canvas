@@ -1,4 +1,4 @@
-import type { CSSProperties, RefObject } from "react";
+import type { RefObject } from "react";
 import logoUrl from "../assets/logo.png";
 import {
   IconCheck,
@@ -6,13 +6,12 @@ import {
   IconDownload,
   IconFileText,
   IconMenu,
-  IconPanelLeft,
   IconPlus,
-  IconQueue,
   IconTrash,
   IconUpload,
   IconX,
 } from "../icons";
+import type { BridgeSummary } from "./BridgeSetupModal";
 import type { ProjectDialogState } from "./AppDialogs";
 import { ProjectMenuItem } from "./ProjectChrome";
 
@@ -31,9 +30,6 @@ type ImportReport = {
 };
 
 export function TopProjectBar(props: {
-  panelOpen: boolean;
-  setPanelOpen: (updater: (v: boolean) => boolean) => void;
-  panelWidth: number;
   projectMenuRef: RefObject<HTMLDivElement | null>;
   projectMenuOpen: boolean;
   setProjectMenuOpen: (updater: (v: boolean) => boolean) => void;
@@ -50,15 +46,13 @@ export function TopProjectBar(props: {
   projects: ProjectSummary[];
   projectId: string | null;
   switchProject: (id: string | null) => void;
-  openQueue: () => void;
-  queueCount: number;
+  bridgeSummary: BridgeSummary | null;
+  bridgeSummaryTimeout: boolean;
+  onOpenBridgeModal: () => void;
   importReport: ImportReport | null;
   dismissImportReport: () => void;
 }) {
   const {
-    panelOpen,
-    setPanelOpen,
-    panelWidth,
     projectMenuRef,
     projectMenuOpen,
     setProjectMenuOpen,
@@ -75,29 +69,19 @@ export function TopProjectBar(props: {
     projects,
     projectId,
     switchProject,
-    openQueue,
-    queueCount,
+    bridgeSummary,
+    bridgeSummaryTimeout,
+    onOpenBridgeModal,
     importReport,
     dismissImportReport,
   } = props;
 
   return (
     <>
-      <header className="safe-top-offset pointer-events-none absolute inset-x-0 z-40 flex h-14 items-center gap-1 px-3">
+      <header className="safe-top-offset pointer-events-none absolute inset-x-0 z-[60] flex h-14 items-center gap-1 px-3">
         <div
-          className="top-cluster-left pointer-events-none flex min-w-0 items-center gap-1"
-          data-panel-open={panelOpen}
-          style={{ "--panel-width": `${panelWidth}px` } as CSSProperties}
+          className="pointer-events-none flex min-w-0 items-center gap-1"
         >
-          <button
-            type="button"
-            onClick={() => setPanelOpen((v) => !v)}
-            className="hit-40 pointer-events-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
-            aria-label={panelOpen ? "关闭左侧面板" : "打开左侧面板"}
-            aria-pressed={panelOpen}
-          >
-            <IconPanelLeft size={16} />
-          </button>
           <img
             src={logoUrl}
             alt="YoYo画布 logo"
@@ -260,30 +244,52 @@ export function TopProjectBar(props: {
           </div>
         </div>
         <span className="flex-1" />
-        <a
-          href="/bridge-admin"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="hit-40 pointer-events-auto mr-1 flex h-8 w-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[12px] font-medium text-[var(--text)] shadow-sm transition-colors hover:bg-[var(--hover)] sm:w-auto sm:px-2.5"
-          aria-label="YoYo桥设置"
-          title="连接 Muse YoYo 桥（账号与隧道管理）"
-        >
-          <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--teal)]" />
-          <span className="hidden sm:inline">YoYo桥设置</span>
-        </a>
-        <button
-          type="button"
-          onClick={openQueue}
-          className="hit-40 pointer-events-auto relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
-          aria-label="打开生成队列"
-        >
-          <IconQueue size={16} />
-          {queueCount > 0 ? (
-            <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-[var(--accent)] px-0.5 text-[10px] font-semibold leading-none text-[var(--accent-ink)]">
-              {queueCount}
-            </span>
-          ) : null}
-        </button>
+        {(() => {
+          const isLoading = bridgeSummary === null && !bridgeSummaryTimeout;
+          const bState = bridgeSummary?.state ?? null;
+          const bLabel = isLoading
+            ? "检测YoYo桥…"
+            : bridgeSummary?.label ?? "YoYo桥设置";
+          const needsAttention = bState === "unconfigured" || bState === "unpaired";
+          const isDisconnected = bState === "disconnected";
+          const isConnected = bState === "connected";
+          const isConnecting = bState === "connecting";
+          return (
+            <button
+              type="button"
+              onClick={onOpenBridgeModal}
+              className={`hit-40 pointer-events-auto mr-1 flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border px-2.5 text-[12px] font-medium shadow-sm transition-colors ${
+                needsAttention
+                  ? "bridge-attention-ring border-[var(--accent)]/60 bg-[var(--accent-soft)] text-[var(--accent)] hover:bg-[var(--accent-soft)]"
+                  : isDisconnected
+                    ? "border-[var(--danger)]/50 bg-[var(--danger-soft)] text-[var(--danger)] hover:bg-[var(--danger-soft)]"
+                    : "border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:bg-[var(--hover)]"
+              }`}
+              aria-label={bLabel}
+              title={bridgeSummary?.summary ?? "连接 Muse YoYo 桥（账号与隧道管理）"}
+            >
+              <span className="relative flex h-2 w-2 shrink-0 items-center justify-center">
+                {needsAttention ? (
+                  <span className="bridge-dot-ping absolute inline-flex h-full w-full rounded-full bg-[var(--accent)]" />
+                ) : null}
+                <span
+                  className={`relative h-2 w-2 rounded-full ${
+                    isConnected
+                      ? "bg-[var(--teal)]"
+                      : isDisconnected
+                        ? "bg-[var(--danger)]"
+                        : isLoading || isConnecting || bState === null
+                          ? "animate-pulse bg-[var(--dim)]"
+                          : "bg-[var(--accent)]"
+                  }`}
+                />
+              </span>
+              <span className={isConnected ? "hidden sm:inline" : "inline"}>
+                {bLabel}
+              </span>
+            </button>
+          );
+        })()}
       </header>
 
       {importReport ? (

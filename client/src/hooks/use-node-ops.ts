@@ -59,7 +59,7 @@ export function newId(): string {
 }
 
 export const NODE_DEFAULTS: Record<NodeType, { w: number; h: number; title: string }> = {
-  text: { w: 240, h: 150, title: "文本节点" },
+  text: { w: 240, h: 270, title: "文本节点" },
   image: { w: 240, h: 190, title: "生图" },
   video: { w: 260, h: 180, title: "生视" },
   audio: { w: 240, h: 120, title: "生音" },
@@ -294,22 +294,73 @@ const insertAsset = useCallback(
       const vp = viewportRef.current;
       const cx = at ? at.x : rect ? (rect.width / 2 - vp.x) / vp.zoom : 240;
       const cy = at ? at.y : rect ? (rect.height / 2 - vp.y) / vp.zoom : 200;
+      const x = Math.round(cx - 160);
+      const y = Math.round(cy - 120);
+      const defaults = NODE_DEFAULTS[payload.kind];
+      // Show an optimistic node immediately so drag/click feels instant;
+      // the server response swaps in the persisted node (real id, seq, genSize).
+      const baseNode = buildNode({
+        type: payload.kind,
+        title: payload.title,
+        width: defaults.w,
+        height: defaults.h,
+        content: payload.content || payload.mediaUrl || "",
+        prompt: payload.prompt,
+        status: "success",
+        hidden: false,
+        groupId: null,
+        color: payload.color,
+        x,
+        y,
+      });
+      const tempNode: CanvasNode | null = baseNode
+        ? {
+            ...baseNode,
+            mediaBlobKey: payload.mediaBlobKey,
+            mediaUrl: payload.mediaUrl ?? null,
+            mimeType: payload.mimeType ?? null,
+            posterBlobKey: payload.posterBlobKey ?? null,
+            posterUrl: payload.posterUrl ?? null,
+          }
+        : null;
+      if (tempNode) {
+        nodesRef.current = [...nodesRef.current, tempNode];
+        setNodes(nodesRef.current);
+        updateSelectedIds(new Set([tempNode.id]));
+        flashNode(tempNode.id);
+      }
       void (async () => {
         try {
           const res = await api.insertAssetToCanvas({
             projectId: pid,
             assetId,
-            x: Math.round(cx - 160),
-            y: Math.round(cy - 120),
+            x,
+            y,
           });
-          if (!nodesRef.current.some((n) => n.id === res.node.id)) {
-            nodesRef.current = [...nodesRef.current, res.node];
-            setNodes(nodesRef.current);
+          if (projectIdRef.current !== pid) return;
+          const cur = tempNode
+            ? nodesRef.current.find((n) => n.id === tempNode.id)
+            : undefined;
+          const merged = cur ? { ...res.node, x: cur.x, y: cur.y } : res.node;
+          nodesRef.current = nodesRef.current
+            .filter((n) => n.id !== tempNode?.id && n.id !== res.node.id)
+            .concat(merged);
+          setNodes(nodesRef.current);
+          if (tempNode && selectedIdsRef.current.has(tempNode.id)) {
+            const nextSel = new Set(selectedIdsRef.current);
+            nextSel.delete(tempNode.id);
+            nextSel.add(res.node.id);
+            updateSelectedIds(nextSel);
+          } else if (!tempNode) {
+            updateSelectedIds(new Set([res.node.id]));
+            flashNode(res.node.id);
           }
-          updateSelectedIds(new Set([res.node.id]));
-          flashNode(res.node.id);
           showToast(`已插入：${payload.title}」到画布`);
         } catch {
+          if (tempNode && projectIdRef.current === pid) {
+            nodesRef.current = nodesRef.current.filter((n) => n.id !== tempNode.id);
+            setNodes(nodesRef.current);
+          }
           showToast("插入资产失败，请稍后重试");
         }
       })();

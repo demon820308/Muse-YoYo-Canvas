@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import { ChipPromptInput } from "./ChipPromptInput";
+import { ChipPromptInput, referenceLabels } from "./ChipPromptInput";
 import { VideoDurationSelect } from "./VideoDurationSelect";
 import {
   IconArrowUp,
@@ -103,6 +103,17 @@ export function GenerationPanel({
   );
   const [expanded, setExpanded] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const plainPromptRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const el = plainPromptRef.current;
+    if (!el) return;
+    if (expanded) {
+      el.style.height = "";
+      return;
+    }
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 280)}px`;
+  }, [node.id, node.prompt, expanded]);
 
   // When a text or sticky-note node is connected and this node's prompt
   // is still empty, auto-fill it once per (node, connectedText) pair so
@@ -174,6 +185,16 @@ export function GenerationPanel({
     (mode === "audio"
       ? references.some((r) => r.node.type === "text")
       : references.length > 0);
+  const labelById = referenceLabels(references);
+  const insertRefMention = (ref: ReferenceInfo) => {
+    const useChipToken = isConfig || node.type === "image" || node.type === "video";
+    const mention = useChipToken
+      ? `@[node:${ref.node.id}]`
+      : `@${labelById.get(ref.node.id) ?? ref.node.title}`;
+    const cur = node.prompt;
+    const sep = cur && !/\s$/.test(cur) ? " " : "";
+    onPatch({ prompt: `${cur}${sep}${mention} ` });
+  };
   const insertPrompt = (content: string) => {
     onPatch({
       prompt: node.prompt.trim()
@@ -184,143 +205,156 @@ export function GenerationPanel({
   };
 
   return (
-    <div className="mt-3">
-      {/* ------------------------------------------------ 参考内容 */}
-      <p className="text-[13px] font-medium">参考内容</p>
-      <div className="mt-2 flex flex-wrap items-start gap-2">
-        {references.map((ref) => {
-          const Icon = NODE_TYPE_ICON[ref.node.type];
-          const thumb =
-            ref.node.type === "image"
-              ? ref.node.mediaUrl
-              : ref.node.type === "video"
-                ? ref.node.posterUrl
-                : null;
-          return (
-            <div
-              key={`${ref.edgeId}:${ref.node.id}`}
-              className="group/ref relative h-[52px] w-[52px] shrink-0 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-3)]"
-              title={ref.node.title}
-            >
-              {thumb ? (
-                <img src={thumb} alt={ref.node.title} className="h-full w-full object-cover" />
-              ) : (
-                <span className="flex h-full w-full flex-col items-center justify-center gap-0.5 text-[var(--dim)]">
-                  {Icon ? <Icon size={18} /> : null}
-                  <span className="max-w-full truncate px-0.5 text-[9px]">
-                    {NODE_TYPE_LABEL[ref.node.type]}
-                  </span>
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => onDisconnect(ref.edgeId)}
-                className="absolute right-0 top-0 flex h-4 w-4 items-center justify-center rounded-full bg-black/70 text-white opacity-0 transition-opacity hover:bg-black focus-visible:opacity-100 group-hover/ref:opacity-100"
-                aria-label={`断开参考 ${ref.node.title}`}
+    <div className="space-y-2.5">
+      {/* ------------------------------------------------ top row: refs + expand */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {references.map((ref) => {
+            const Icon = NODE_TYPE_ICON[ref.node.type];
+            const label = labelById.get(ref.node.id) ?? ref.node.title;
+            const thumb =
+              ref.node.type === "image"
+                ? ref.node.mediaUrl
+                : ref.node.type === "video"
+                  ? ref.node.posterUrl
+                  : null;
+            return (
+              <div
+                key={`${ref.edgeId}:${ref.node.id}`}
+                role="button"
+                tabIndex={0}
+                onClick={() => insertRefMention(ref)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    insertRefMention(ref);
+                  }
+                }}
+                className="group/ref relative h-10 w-10 shrink-0 cursor-pointer overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-3)] transition-colors hover:border-[var(--accent)]"
+                title={`点击插入 @${label}（${ref.node.title}）`}
+                aria-label={`插入参考 @${label}`}
               >
-                <IconX size={10} />
-              </button>
-            </div>
-          );
-        })}
-        <div className="relative shrink-0">
-          <button
-            type="button"
-            onClick={() => {
-              setShowPicker((v) => !v);
-              setShowPrompts(false);
-            }}
-            className="flex h-[52px] w-[52px] items-center justify-center rounded-xl border border-dashed border-[var(--border)] text-[var(--dim)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
-            aria-label="添加参考内容"
-            aria-expanded={showPicker}
-            title="添加参考内容"
-          >
-            <IconPlus size={20} />
-          </button>
-          {showPicker ? (
-            <div className="absolute left-0 top-full z-30 mt-1 max-h-56 w-60 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1.5 shadow-[var(--shadow)]">
-              {addable.length === 0 ? (
-                <p className="px-2 py-2 text-xs leading-5 text-[var(--dim)]">
-                  画布上没有可添加的节点了。
-                </p>
-              ) : (
-                addable.map((c) => {
-                  const Icon = NODE_TYPE_ICON[c.type];
-                  const thumb =
-                    c.type === "image"
-                      ? c.mediaUrl
-                      : c.type === "video"
-                        ? c.posterUrl
-                        : null;
-                  return (
-                    <button
-                      key={c.id}
-                      type="button"
-                      onClick={() => onConnectNode(c.id)}
-                      className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-[var(--hover)]"
-                      aria-label={`添加参考 ${c.title}`}
-                    >
-                      <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md bg-[var(--surface-3)] text-[var(--dim)]">
-                        {thumb ? (
-                          <img src={thumb} alt="" className="h-full w-full object-cover" />
-                        ) : Icon ? (
-                          <Icon size={15} />
-                        ) : null}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate text-[13px]">
-                        {c.title}
-                      </span>
-                      <span className="shrink-0 text-[11px] text-[var(--dim)]">
-                        {NODE_TYPE_LABEL[c.type]}
-                      </span>
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          ) : null}
+                {thumb ? (
+                  <img src={thumb} alt={ref.node.title} className="h-full w-full object-cover" />
+                ) : (
+                  <span className="flex h-full w-full flex-col items-center justify-center gap-0.5 text-[var(--dim)]">
+                    {Icon ? <Icon size={15} /> : null}
+                    <span className="max-w-full truncate px-0.5 text-[9px]">
+                      {NODE_TYPE_LABEL[ref.node.type]}
+                    </span>
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDisconnect(ref.edgeId);
+                  }}
+                  className="absolute right-0 top-0 flex h-4 w-4 items-center justify-center rounded-full bg-black/75 text-white opacity-0 transition-opacity hover:bg-black focus-visible:opacity-100 group-hover/ref:opacity-100"
+                  aria-label={`断开参考 ${ref.node.title}`}
+                >
+                  <IconX size={10} />
+                </button>
+              </div>
+            );
+          })}
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setShowPicker((v) => !v);
+                setShowPrompts(false);
+              }}
+              className="flex h-10 w-10 items-center justify-center rounded-xl border border-dashed border-[var(--border)] text-[var(--dim)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
+              aria-label="添加参考内容"
+              aria-expanded={showPicker}
+              title="添加参考内容（或从画布连入左侧端口）"
+            >
+              <IconPlus size={18} />
+            </button>
+            {showPicker ? (
+              <div className="absolute left-0 top-full z-30 mt-1 max-h-56 w-60 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1.5 shadow-[var(--shadow)]">
+                {addable.length === 0 ? (
+                  <p className="px-2 py-2 text-xs leading-5 text-[var(--dim)]">
+                    画布上没有可添加的节点了。
+                  </p>
+                ) : (
+                  addable.map((c) => {
+                    const Icon = NODE_TYPE_ICON[c.type];
+                    const thumb =
+                      c.type === "image"
+                        ? c.mediaUrl
+                        : c.type === "video"
+                          ? c.posterUrl
+                          : null;
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => onConnectNode(c.id)}
+                        className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-[var(--hover)]"
+                        aria-label={`添加参考 ${c.title}`}
+                      >
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md bg-[var(--surface-3)] text-[var(--dim)]">
+                          {thumb ? (
+                            <img src={thumb} alt="" className="h-full w-full object-cover" />
+                          ) : Icon ? (
+                            <Icon size={15} />
+                          ) : null}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-[13px]">
+                          {c.title}
+                        </span>
+                        <span className="shrink-0 text-[11px] text-[var(--dim)]">
+                          {NODE_TYPE_LABEL[c.type]}
+                        </span>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            ) : null}
+          </div>
         </div>
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
+          aria-label={expanded ? "收起输入区" : "展开输入区"}
+          aria-pressed={expanded}
+          title={expanded ? "收起" : "展开"}
+        >
+          {expanded ? <IconMinimize size={15} /> : <IconMaximize size={15} />}
+        </button>
       </div>
-      {references.length === 0 ? (
-        <p className="mt-1.5 text-[11px] leading-4 text-[var(--dim)]">
-          还没有参考内容：点 + 从画布添加，或把节点连到此节点左侧端口。
-        </p>
-      ) : null}
 
       {/* ------------------------------------------------ prompt input */}
-      <div className="mt-3">
+      <div>
         {isConfig || node.type === "image" || node.type === "video" ? (
           <ChipPromptInput
             value={node.prompt}
             references={references}
             onChange={(serialized) => onPatch({ prompt: serialized })}
             ariaLabel={isConfig ? "配置提示词（可 @ 引用连入节点）" : "生成提示词（可 @ 引用参考图或节点）"}
-            placeholder={isConfig ? "输入提示词，按 @ 引用连接的图片、文本或组" : `${promptPlaceholder}（按 @ 引用参考图）`}
+            placeholder={isConfig ? "输入提示词，按 @ 或点击上方参考图引用" : `${promptPlaceholder}（按 @ 或点上方参考图引用）`}
             expanded={expanded}
+            minimal
           />
         ) : (
           <textarea
+            ref={plainPromptRef}
             value={node.prompt}
             onChange={(e) => onPatch({ prompt: e.target.value })}
             aria-label="生成提示词"
             placeholder={promptPlaceholder}
-            className={`${expanded ? "h-[200px]" : "h-[64px]"} w-full resize-none rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1.5 text-sm leading-6 outline-none placeholder:text-[var(--dim)] focus:border-[var(--accent)]`}
+            rows={3}
+            className={`${expanded ? "h-[240px]" : "min-h-[76px] max-h-[280px]"} w-full resize-none bg-transparent px-0.5 py-1 text-sm leading-6 outline-none placeholder:text-[var(--dim)]`}
           />
         )}
       </div>
 
       {/* ------------------------------------------------ bottom bar */}
-      <div className="mt-2.5 flex flex-wrap items-center gap-1">
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
-          aria-label={expanded ? "收起输入区" : "展开输入区"}
-          aria-pressed={expanded}
-          title={expanded ? "收起" : "展开"}
-        >
-          {expanded ? <IconMinimize size={16} /> : <IconMaximize size={16} />}
-        </button>
+      <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
         <div className="relative shrink-0">
           <button
             type="button"
@@ -364,22 +398,6 @@ export function GenerationPanel({
             </div>
           ) : null}
         </div>
-        {/* Model row: generation runs on the single platform channel
-         * (no external API key, no model choice), so the picker
-         * honestly offers that one channel — same as the config
-         * node's model row. The select keeps a fixed shrink-0 width
-         * sized to its label: the inline ratio/duration group beside
-         * it must never squeeze it into truncating 「平台通道 · 自动」
-         * (Wei 2026-11-15); the spacer before the send button takes
-         * whatever room is left. */}
-        <select
-          value="platform"
-          onChange={() => undefined}
-          className="w-auto shrink-0 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-xs text-[var(--text)]"
-          aria-label="生成模型（本画布只有平台通道一个选项）"
-        >
-          <option value="platform">平台通道 · 自动</option>
-        </select>
         {inlineVideoParams ? (
           <span className="flex flex-wrap items-center gap-1.5">
             <RatioSelect
@@ -397,18 +415,11 @@ export function GenerationPanel({
           </span>
         ) : null}
         {inlineImageParams ? (
-          <span className="flex flex-wrap items-center gap-1.5">
-            <RatioSelect
-              value={ratio}
-              onChange={(r) => onPatch({ genRatio: r })}
-              showSize
-            />
-            {ratioSize ? (
-              <span className="shrink-0 text-xs text-[var(--dim)]">
-                {ratioSize}
-              </span>
-            ) : null}
-          </span>
+          <RatioSelect
+            value={ratio}
+            onChange={(r) => onPatch({ genRatio: r })}
+            showSize
+          />
         ) : null}
         {!inlineVideoParams && (!inlineImageParams || isConfig) ? (
           <button

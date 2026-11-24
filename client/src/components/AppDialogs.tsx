@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
 import { api } from "../api";
 import type { NodeRunFeedback } from "./run-feedback";
 import { AngleDialog, type AngleParams } from "./AngleDialog";
@@ -23,6 +23,70 @@ export type EditorDialogState =
   | null;
 
 type MutationFlag = { isPending: boolean };
+
+function DangerYesConfirm(props: {
+  actionLabel: string;
+  confirmLabel: string;
+  pending?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const { actionLabel, confirmLabel, pending = false, onConfirm, onCancel } = props;
+  const [step, setStep] = useState(false);
+  const [text, setText] = useState("");
+  const canConfirm = text.trim().toLowerCase() === "yes" && !pending;
+
+  return (
+    <>
+      {step ? (
+        <div className="mt-4">
+          <label className="block text-xs text-[var(--dim)]">
+            请输入 <span className="font-mono font-semibold text-[var(--ink)]">yes</span> {confirmLabel}
+          </label>
+          <input
+            autoFocus
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && canConfirm) onConfirm();
+            }}
+            placeholder="yes"
+            aria-label={`输入 yes ${confirmLabel}`}
+            className="mt-1.5 w-full rounded border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1.5 text-sm outline-none focus:border-[var(--danger)]"
+          />
+        </div>
+      ) : null}
+      <div className="mt-5 flex gap-2">
+        {step ? (
+          <button
+            type="button"
+            disabled={!canConfirm}
+            onClick={onConfirm}
+            className="rounded bg-[var(--danger)] px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
+          >
+            {confirmLabel}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setStep(true)}
+            className="rounded bg-[var(--danger)] px-3 py-2 text-sm font-medium text-white"
+          >
+            {actionLabel}
+          </button>
+        )}
+        <button
+          type="button"
+          disabled={pending}
+          onClick={onCancel}
+          className="rounded border border-[var(--border)] px-3 py-2 text-sm disabled:opacity-40"
+        >
+          取消
+        </button>
+      </div>
+    </>
+  );
+}
 
 export function AppDialogs(props: {
   clearConfirmOpen: boolean;
@@ -137,22 +201,12 @@ export function AppDialogs(props: {
             <p className="mt-2 text-sm text-[var(--dim)]">
               当前项目的全部节点与连线会被删除。清空后可以点工具条的「撤销」恢复。
             </p>
-            <div className="mt-5 flex gap-2">
-              <button
-                type="button"
-                onClick={clearCanvas}
-                className="rounded bg-[var(--danger)] px-3 py-2 text-sm font-medium text-white"
-              >
-                清空
-              </button>
-              <button
-                type="button"
-                onClick={() => setClearConfirmOpen(false)}
-                className="rounded border border-[var(--border)] px-3 py-2 text-sm"
-              >
-                取消
-              </button>
-            </div>
+            <DangerYesConfirm
+              actionLabel="清空"
+              confirmLabel="确认清空"
+              onConfirm={clearCanvas}
+              onCancel={() => setClearConfirmOpen(false)}
+            />
           </div>
         </div>
       ) : null}
@@ -180,23 +234,13 @@ export function AppDialogs(props: {
                 <p className="mt-2 text-sm text-[var(--dim)]">
                   项目里的全部节点与连线会一起删除，资产库与提示词库不受影响。此操作不可撤销。
                 </p>
-                <div className="mt-5 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => deleteProject.mutate(dialog.id)}
-                    disabled={deleteProject.isPending}
-                    className="rounded bg-[var(--danger)] px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
-                  >
-                    删除
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDialog(null)}
-                    className="rounded border border-[var(--border)] px-3 py-2 text-sm"
-                  >
-                    取消
-                  </button>
-                </div>
+                <DangerYesConfirm
+                  actionLabel="删除"
+                  confirmLabel="确认删除"
+                  pending={deleteProject.isPending}
+                  onConfirm={() => deleteProject.mutate(dialog.id)}
+                  onCancel={() => setDialog(null)}
+                />
               </>
             ) : dialog.mode === "move-dir" ? (
               <>

@@ -159,9 +159,11 @@ export async function blobUrl(ctx: Ctx, key: string | null): Promise<string | nu
 }
 
 export async function toNode(ctx: Ctx, row: NodeRow): Promise<z.infer<typeof nodeShape>> {
-  const mediaUrl = await blobUrl(ctx, row.mediaBlobKey);
-  const posterUrl = await blobUrl(ctx, row.posterBlobKey);
-  const proxyUrl = await blobUrl(ctx, row.proxyBlobKey);
+  const [mediaUrl, posterUrl, proxyUrl] = await Promise.all([
+    blobUrl(ctx, row.mediaBlobKey),
+    blobUrl(ctx, row.posterBlobKey),
+    blobUrl(ctx, row.proxyBlobKey),
+  ]);
   return {
     id: row.id,
     projectId: row.projectId,

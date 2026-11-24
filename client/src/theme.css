@@ -61,15 +61,15 @@
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
-    --bg: #101114;
-    --board: #17181c;
-    --dot: #26272e;
-    --surface: #202228;
-    --surface-2: #23242b;
-    --surface-3: #2e3038;
+    --bg: #08080a;
+    --board: #0b0b0d;
+    --dot: #26262a;
+    --surface: #16161a;
+    --surface-2: #1c1c21;
+    --surface-3: #26262d;
     --text: #eceef2;
     --dim: #9aa0ad;
-    --border: #2e3038;
+    --border: #2a2a32;
     --accent: #e8a33d;
     --accent-ink: #241a08;
     --accent-soft: #3d2f16;
@@ -119,15 +119,15 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #101114;
-  --board: #17181c;
-  --dot: #26272e;
-  --surface: #202228;
-  --surface-2: #23242b;
-  --surface-3: #2e3038;
+  --bg: #08080a;
+  --board: #0b0b0d;
+  --dot: #26262a;
+  --surface: #16161a;
+  --surface-2: #1c1c21;
+  --surface-3: #26262d;
   --text: #eceef2;
   --dim: #9aa0ad;
-  --border: #2e3038;
+  --border: #2a2a32;
   --accent: #e8a33d;
   --accent-ink: #241a08;
   --accent-soft: #3d2f16;
@@ -167,10 +167,48 @@
 
 /* Floating capsule chrome shared by the canvas shell. */
 .capsule-chrome {
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
   border: 1px solid var(--border);
   box-shadow: var(--shadow);
-  backdrop-filter: blur(10px);
+  backdrop-filter: blur(12px);
+}
+
+/* Tactile floating pill button (Updream-inspired hover lift, surface brighten,
+ * crisp rim highlight, and press-down feedback). */
+.capsule-btn {
+  cursor: pointer;
+  user-select: none;
+  transition:
+    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 180ms ease;
+}
+.capsule-btn:hover {
+  transform: translateY(-1px);
+  background: color-mix(in srgb, var(--surface-2) 96%, var(--text) 4%);
+  border-color: color-mix(in srgb, var(--text) 24%, var(--border));
+  box-shadow:
+    0 12px 28px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+.capsule-btn:active {
+  transform: translateY(0) scale(0.97);
+  background: var(--surface-3);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+}
+.capsule-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .capsule-btn {
+    transition: background-color 140ms ease, border-color 140ms ease;
+  }
+  .capsule-btn:hover,
+  .capsule-btn:active {
+    transform: none;
+  }
 }
 
 /* Scrollable node content (text nodes): a slim, theme-matched
@@ -346,4 +384,70 @@
     animation: none;
     background-image: none;
   }
+  .bridge-attention-ring,
+  .bridge-dot-ping {
+    animation: none !important;
+  }
+}
+
+@keyframes bridge-attention-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(217, 119, 6, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(217, 119, 6, 0);
+  }
+}
+
+@keyframes bridge-dot-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  75%,
+  100% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+
+.bridge-attention-ring {
+  animation: bridge-attention-pulse 1.9s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.bridge-dot-ping {
+  animation: bridge-dot-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes node-focus-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.78), 0 0 18px 2px rgba(var(--accent-rgb), 0.42);
+  }
+  50% {
+    box-shadow: 0 0 0 10px rgba(var(--accent-rgb), 0), 0 0 24px 4px rgba(var(--accent-rgb), 0.25);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0), 0 0 12px 0 rgba(var(--accent-rgb), 0.15);
+  }
+}
+
+@keyframes node-generating-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45), 0 0 14px rgba(var(--accent-rgb), 0.2);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0.75), 0 0 22px rgba(var(--accent-rgb), 0.4);
+  }
+}
+
+.node-focus-pulse {
+  animation: node-focus-pulse 0.85s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.node-generating-glow {
+  animation: node-generating-glow 1.8s ease-in-out infinite;
 }

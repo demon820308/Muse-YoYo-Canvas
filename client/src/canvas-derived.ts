@@ -181,7 +181,8 @@ export function computeHoverPreviewData(opts: {
     }
     if (hoveredAsset.kind === "video") {
       const poster = hoveredAsset.posterUrl ?? null;
-      return poster || hoveredAsset.mediaUrl ? { title: hoveredAsset.title, kind: "video", src: null, poster } : null;
+      const src = hoveredAsset.mediaUrl ?? (isMediaUrl(hoveredAsset.content) ? hoveredAsset.content : null);
+      return poster || src ? { title: hoveredAsset.title, kind: "video", src, poster } : null;
     }
     return null;
   }
@@ -202,12 +203,13 @@ export function computeHoverPreviewData(opts: {
   }
   if (n.type === "video") {
     const poster = n.posterUrl;
-    if (!poster && !n.mediaUrl) return null;
+    const src = n.mediaUrl ?? (isMediaUrl(n.content) ? n.content : null);
+    if (!poster && !src) return null;
     const measured = n.genSize?.match(/^(\d+)x(\d+)$/);
     return {
       title: n.title,
       kind: "video",
-      src: null,
+      src,
       poster,
       natW: measured ? Number(measured[1]) : n.width,
       natH: measured ? Number(measured[2]) : n.height,

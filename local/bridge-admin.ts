@@ -20,6 +20,7 @@ import {
   addProfile,
   deleteProfile,
   effectiveProfiles,
+  getBridgeTelemetry,
   maskToken,
   profileLastSeenAt,
   readProfilesFile,
@@ -543,12 +544,243 @@ function tunnelError(deps: Deps, err: unknown): Promise<Response> {
   );
 }
 
+const SUMMARY_TTL_MS = 30_000;
+let cachedTunnelStatus: { hostname: string; at: number; status: TunnelStatus } | null = null;
+
+function invalidateSummaryCache(): void {
+  cachedTunnelStatus = null;
+}
+
+async function getDiagnosis(_deps: Deps, forceFresh = false) {
+  const hostname = tunnelWizard.savedHostname();
+  const eff = effectiveProfiles();
+  const active = eff.profiles.find((p) => p.id === eff.activeProfileId) ?? null;
+  const now = Date.now();
+  const useCache =
+    !forceFresh &&
+    !tunnelWizard.anyJobRunning() &&
+    cachedTunnelStatus !== null &&
+    cachedTunnelStatus.hostname === hostname &&
+    now - cachedTunnelStatus.at < SUMMARY_TTL_MS;
+  const cachedStatus = useCache ? cachedTunnelStatus!.status : undefined;
+  const diagnosis = await tunnelWizard.diagnose(hostname, {
+    activeProfile: active,
+    profileLastSeenAt: active ? profileLastSeenAt(active.id) : null,
+    envDriven: eff.envDriven,
+    telemetry: getBridgeTelemetry(),
+    cachedStatus,
+  });
+  if (!useCache && diagnosis.state !== "connecting") {
+    cachedTunnelStatus = { hostname, at: now, status: diagnosis.status };
+  }
+  return { hostname, eff, active, diagnosis };
+}
+
+async function handleBridgeApi(
+  req: Request,
+  path: string,
+  deps: Deps,
+): Promise<Response> {
+  if (req.method === "GET" && path === "/bridge-admin/api/summary") {
+    const { hostname, active, diagnosis } = await getDiagnosis(deps, false);
+    return Response.json({
+      state: diagnosis.state,
+      label: diagnosis.label,
+      summary: diagnosis.summary,
+      hostname,
+      activeProfile: active
+        ? {
+            id: active.id,
+            label: active.label,
+            maskedToken: maskToken(active.token),
+            lastSeenAt: profileLastSeenAt(active.id),
+            everConnectedAt: active.everConnectedAt ?? null,
+          }
+        : null,
+      jobRunning: tunnelWizard.anyJobRunning(),
+    });
+  }
+
+  if (req.method === "GET" && path === "/bridge-admin/api/state") {
+    const { hostname, eff, diagnosis } = await getDiagnosis(deps, false);
+    const counts = await jobCounts(deps.db);
+    return Response.json({
+      hostname,
+      envDriven: eff.envDriven,
+      activeProfileId: eff.activeProfileId,
+      profiles: eff.profiles.map((p) => ({
+        id: p.id,
+        label: p.label,
+        maskedToken: maskToken(p.token),
+        createdAt: p.createdAt,
+        lastSeenAt: profileLastSeenAt(p.id),
+        everConnectedAt: p.everConnectedAt ?? null,
+      })),
+      diagnosis,
+      jobs: tunnelWizard.listJobs(),
+      tunnelLogTail: tunnelWizard.tunnelLogTail(),
+      counts,
+      telemetry: getBridgeTelemetry(),
+      childRunning: tunnelWizard.childRunning(),
+      manualStop: tunnelWizard.isManuallyStopped(),
+    });
+  }
+
+  if (req.method === "POST" && path === "/bridge-admin/api/diagnose") {
+    invalidateSummaryCache();
+    const { diagnosis } = await getDiagnosis(deps, true);
+    return Response.json({ diagnosis });
+  }
+
+  if (req.method === "POST" && path === "/bridge-admin/api/wizard/start") {
+    const body = (await req.json().catch(() => null)) as
+      | { label?: string; hostname?: string }
+      | null;
+    const hostname = (body?.hostname ?? "").trim().toLowerCase();
+    if (!isValidHostname(hostname)) {
+      return Response.json(
+        { error: "子域名格式不对：只许字母、数字、点、连字符，且至少含一个点" },
+        { status: 400 },
+      );
+    }
+    const label = (body?.label ?? "").trim() || "主账号";
+    invalidateSummaryCache();
+    tunnelWizard.saveHostname(hostname);
+
+    let plainToken: string | null = null;
+    const eff = effectiveProfiles();
+    let activeId = eff.activeProfileId;
+    if (!eff.envDriven) {
+      const existing = eff.profiles.find((p) => p.label === label);
+      if (existing) {
+        activateProfile(existing.id);
+        activeId = existing.id;
+        plainToken = existing.token;
+      } else {
+        const created = addProfile(label);
+        activateProfile(created.id);
+        activeId = created.id;
+        plainToken = created.token;
+      }
+    } else {
+      plainToken = eff.profiles[0]?.token ?? null;
+    }
+
+    const job = tunnelWizard.startAutoSetup(hostname, plainToken);
+    return Response.json({
+      job,
+      hostname,
+      activeProfileId: activeId,
+      plainToken,
+    });
+  }
+
+  if (req.method === "POST" && path === "/bridge-admin/api/fix") {
+    const body = (await req.json().catch(() => null)) as
+      | { fixId?: string; confirm?: boolean }
+      | null;
+    const hostname = tunnelWizard.savedHostname();
+    invalidateSummaryCache();
+    const eff = effectiveProfiles();
+    const active = eff.profiles.find((p) => p.id === eff.activeProfileId) ?? null;
+
+    let fixId = body?.fixId ?? "auto-safe";
+    if (fixId === "auto-safe") {
+      const { diagnosis } = await getDiagnosis(deps, true);
+      const firstFix = diagnosis.layers.find(
+        (l) =>
+          l.status === "error" &&
+          l.fixAction &&
+          !l.fixAction.dangerous &&
+          l.fixAction.id !== "goto-wizard",
+      )?.fixAction;
+      if (!firstFix) {
+        return Response.json({
+          ok: false,
+          message: "没有可自动修复的安全项，请查看下方逐层说明",
+        });
+      }
+      fixId = firstFix.id;
+    }
+
+    if (fixId.startsWith("activate-profile:")) {
+      const targetId = fixId.slice("activate-profile:".length);
+      activateProfile(targetId);
+      return Response.json({ ok: true, message: "已切换当前启用账号" });
+    }
+    if (fixId === "stop-tunnel") {
+      return Response.json({ ok: true, message: tunnelWizard.stopRun() });
+    }
+    if (fixId === "overwrite-dns" && !body?.confirm) {
+      return Response.json(
+        { error: "覆盖写解析需要确认", needsConfirm: true },
+        { status: 400 },
+      );
+    }
+    const res = await tunnelWizard.applyFix(fixId, hostname, active?.token ?? null);
+    return Response.json(res, { status: res.ok ? 200 : 400 });
+  }
+
+  if (req.method === "POST" && path === "/bridge-admin/api/profiles/add") {
+    const body = (await req.json().catch(() => null)) as { label?: string } | null;
+    invalidateSummaryCache();
+    const profile = addProfile(body?.label?.trim() || undefined);
+    return Response.json({
+      profile: {
+        id: profile.id,
+        label: profile.label,
+        maskedToken: maskToken(profile.token),
+        createdAt: profile.createdAt,
+      },
+      plainToken: profile.token,
+    });
+  }
+
+  if (req.method === "POST" && path === "/bridge-admin/api/profiles/activate") {
+    const body = (await req.json().catch(() => null)) as { id?: string } | null;
+    if (!body?.id) return Response.json({ error: "缺少 id" }, { status: 400 });
+    invalidateSummaryCache();
+    activateProfile(body.id);
+    return Response.json({ ok: true });
+  }
+
+  if (req.method === "POST" && path === "/bridge-admin/api/profiles/rename") {
+    const body = (await req.json().catch(() => null)) as
+      | { id?: string; label?: string }
+      | null;
+    if (!body?.id) return Response.json({ error: "缺少 id" }, { status: 400 });
+    renameProfile(body.id, body.label ?? "");
+    return Response.json({ ok: true });
+  }
+
+  if (req.method === "POST" && path === "/bridge-admin/api/profiles/delete") {
+    const body = (await req.json().catch(() => null)) as { id?: string } | null;
+    if (!body?.id) return Response.json({ error: "缺少 id" }, { status: 400 });
+    invalidateSummaryCache();
+    deleteProfile(body.id);
+    return Response.json({ ok: true });
+  }
+
+  return Response.json({ error: "not_found" }, { status: 404 });
+}
+
 export async function handleBridgeAdmin(
   req: Request,
   url: URL,
   deps: Deps,
 ): Promise<Response> {
   const path = url.pathname;
+
+  if (path.startsWith("/bridge-admin/api/")) {
+    try {
+      return await handleBridgeApi(req, path, deps);
+    } catch (err) {
+      return Response.json(
+        { error: err instanceof Error ? err.message : String(err) },
+        { status: 400 },
+      );
+    }
+  }
 
   if (req.method === "GET" && (path === "/bridge-admin" || path === "/bridge-admin/")) {
     return renderList(deps);

@@ -492,4 +492,145 @@ describe("防呆加固：多机隧道名、小写 JSON、防假绿与 530 识别
     expect(await w.ensureRunning("yoyo-bridge.ck971.cc.cd")).toBe(null);
     expect(spawnCount).toBe(1);
   });
+
+  test("diagnose 四态判定：unconfigured / unpaired / disconnected / connected", async () => {
+    const deps = fakeDeps({
+      platform: () => "win32",
+      exec: async (cmd, args) => {
+        if (cmd === "sc" && args[0] === "query") {
+          return { code: 0, out: "STATE              : 4  RUNNING", err: "" };
+        }
+        if (args[0] === "tunnel" && args[1] === "list") {
+          return {
+            code: 0,
+            out: JSON.stringify([{ id: FAKE_ID, name: "yoyo-bridge" }]),
+            err: "",
+          };
+        }
+        return { code: 0, out: "cloudflared version 2026.11.1", err: "" };
+      },
+      resolveDns: async () => ({
+        cname: [`${FAKE_ID}.cfargotunnel.com`],
+        a: [],
+        aaaa: [],
+      }),
+      probeDetail: async () => ({ status: 200, cfErrorCode: null }),
+      probe: async () => true,
+    });
+    const cfDir = join(deps.homeDir(), ".cloudflared");
+    mkdirSync(cfDir, { recursive: true });
+    writeFileSync(join(cfDir, "cert.pem"), "cert", "utf8");
+    const w = new TunnelWizard(deps);
+
+    // 1. 未配置（缺 config.yml 与凭据）
+    const d1 = await w.diagnose("yoyo-bridge.ck971.cc.cd", {
+      activeProfile: null,
+      profileLastSeenAt: null,
+      envDriven: false,
+      telemetry: {
+        processStartedAt: Date.now(),
+        lastInvalidTokenAt: null,
+        lastInactiveVisit: null,
+      },
+    });
+    expect(d1.state).toBe("unconfigured");
+    expect(d1.label).toBe("YoYo桥未配置");
+
+    // 写入凭据与 config.yml
+    writeFileSync(join(cfDir, `${FAKE_ID}.json`), "{}", "utf8");
+    writeFileSync(
+      join(cfDir, "config.yml"),
+      buildConfigYml({
+        tunnelId: FAKE_ID,
+        hostname: "yoyo-bridge.ck971.cc.cd",
+        credentialsFile: join(cfDir, `${FAKE_ID}.json`),
+      }),
+      "utf8",
+    );
+
+    // 2. 本地就绪但从未配对 → Muse YoYo桥未配对
+    const d2 = await w.diagnose("yoyo-bridge.ck971.cc.cd", {
+      activeProfile: { id: "p1", label: "主账号", token: "tok", everConnectedAt: null },
+      profileLastSeenAt: null,
+      envDriven: false,
+      telemetry: {
+        processStartedAt: Date.now(),
+        lastInvalidTokenAt: null,
+        lastInactiveVisit: null,
+      },
+    });
+    expect(d2.state).toBe("unpaired");
+    expect(d2.label).toBe("Muse YoYo桥未配对");
+
+    // 3. 曾配对但收到 401 错令牌 → YoYo桥连接已断开
+    const d3 = await w.diagnose("yoyo-bridge.ck971.cc.cd", {
+      activeProfile: { id: "p1", label: "主账号", token: "tok", everConnectedAt: 1000 },
+      profileLastSeenAt: null,
+      envDriven: false,
+      telemetry: {
+        processStartedAt: Date.now(),
+        lastInvalidTokenAt: Date.now(),
+        lastInactiveVisit: null,
+      },
+    });
+    expect(d3.state).toBe("disconnected");
+    expect(d3.label).toBe("YoYo桥连接已断开");
+
+    // 4. 曾配对且隧道 200 + 近期心跳 → YoYo桥已连接
+    const d4 = await w.diagnose("yoyo-bridge.ck971.cc.cd", {
+      activeProfile: { id: "p1", label: "主账号", token: "tok", everConnectedAt: 1000 },
+      profileLastSeenAt: Date.now(),
+      envDriven: false,
+      telemetry: {
+        processStartedAt: Date.now(),
+        lastInvalidTokenAt: null,
+        lastInactiveVisit: null,
+      },
+    });
+    expect(d4.state).toBe("connected");
+    expect(d4.label).toBe("YoYo桥已连接");
+
+    // 5. 刚启动隧道但公网尚未连通（预热期）→ YoYo桥连接中…
+    const depsConnecting = fakeDeps({
+      ...deps,
+      probeDetail: async () => ({ status: 530, cfErrorCode: 1033 }),
+      probe: async () => false,
+      spawnTunnel: () => {
+        const ee = new EventEmitter() as ChildProcess & {
+          exitCode: number | null;
+          kill: () => boolean;
+        };
+        ee.exitCode = null;
+        ee.kill = () => true;
+        return ee;
+      },
+    });
+    const cf2 = join(depsConnecting.homeDir(), ".cloudflared");
+    mkdirSync(cf2, { recursive: true });
+    writeFileSync(join(cf2, "cert.pem"), "cert", "utf8");
+    writeFileSync(join(cf2, `${FAKE_ID}.json`), "{}", "utf8");
+    writeFileSync(
+      join(cf2, "config.yml"),
+      buildConfigYml({
+        tunnelId: FAKE_ID,
+        hostname: "yoyo-bridge.ck971.cc.cd",
+        credentialsFile: join(cf2, `${FAKE_ID}.json`),
+      }),
+      "utf8",
+    );
+    const wConn = new TunnelWizard(depsConnecting);
+    wConn.startRun("yoyo-bridge.ck971.cc.cd");
+    const d5 = await wConn.diagnose("yoyo-bridge.ck971.cc.cd", {
+      activeProfile: { id: "p1", label: "主账号", token: "tok", everConnectedAt: 1000 },
+      profileLastSeenAt: null,
+      envDriven: false,
+      telemetry: {
+        processStartedAt: Date.now(),
+        lastInvalidTokenAt: null,
+        lastInactiveVisit: null,
+      },
+    });
+    expect(d5.state).toBe("connecting");
+    expect(d5.label).toBe("YoYo桥连接中…");
+  });
 });

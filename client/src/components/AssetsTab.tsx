@@ -1,7 +1,8 @@
 // The side panel's 资产 tab: the server-side asset library for the
 // open project, grouped by kind. AssetRow is one library row — thumbnail, rename, preview, insert and delete.
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fileToBase64 } from "@hatch/space-sdk/client";
 import { api } from "../api";
@@ -16,15 +17,20 @@ import {
 import { isMediaUrl } from "../node-utils";
 import {
   IconBookmark,
+  IconCheck,
   IconChevronDown,
   IconChevronRight,
   IconEye,
+  IconGrid,
   IconInsert,
+  IconList,
   IconPencil,
+  IconPlay,
   IconPlus,
   IconSearch,
   IconTrash,
   IconUpload,
+  IconX,
 } from "../icons";
 import { NodeThumb } from "./CanvasNodesTab";
 
@@ -55,6 +61,12 @@ export function AssetsTab({
     queryFn: () => api.listAssets({ projectId }),
   });
   const [keyword, setKeyword] = useState("");
+  const [kindFilter, setKindFilter] = useState<"all" | "image" | "video" | "audio" | "text">("all");
+  const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
+  const [manageOpen, setManageOpen] = useState(false);
+  const [manageMulti, setManageMulti] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showTags, setShowTags] = useState(false);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [showNodePicker, setShowNodePicker] = useState(false);
@@ -105,9 +117,52 @@ export function AssetsTab({
         .join(" ")
         .toLowerCase()
         .includes(query);
+    const matchesKind = kindFilter === "all" || a.kind === kindFilter;
     const matchesTag = !tagFilter || a.tags.includes(tagFilter);
-    return matchesQuery && matchesTag;
+    return matchesQuery && matchesKind && matchesTag;
   });
+
+  useEffect(() => {
+    if (!manageOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (manageMulti) {
+          setManageMulti(false);
+          setSelectedIds(new Set());
+        } else {
+          setManageOpen(false);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [manageOpen, manageMulti]);
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const batchInsertSelected = () => {
+    filtered
+      .filter((a) => selectedIds.has(a.id))
+      .forEach((a) => onInsert(buildAssetInsertPayload(a)));
+    setManageMulti(false);
+    setSelectedIds(new Set());
+    setManageOpen(false);
+  };
+
+  const batchDeleteSelected = async () => {
+    const ids = [...selectedIds];
+    if (!ids.length) return;
+    await Promise.all(ids.map((id) => removeAsset.mutateAsync(id)));
+    setSelectedIds(new Set());
+    setManageMulti(false);
+  };
 
   const saveNodeAsAsset = (node: CanvasNode) => {
     addAsset.mutate({
@@ -146,6 +201,10 @@ export function AssetsTab({
               ? "audio"
               : null;
         if (!kind) {
+          skipped += 1;
+          continue;
+        }
+        if (file.size > 256 * 1024 * 1024) {
           skipped += 1;
           continue;
         }
@@ -196,20 +255,83 @@ export function AssetsTab({
   return (
     <div className="flex h-full flex-col">
       <div className="space-y-2 px-3 pb-2">
-        <label className="relative block">
-          <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--dim)]">
-            <IconSearch size={14} />
-          </span>
-          <input
-            type="search"
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            placeholder="搜索资产"
-            aria-label="搜索资产"
-            className="w-full rounded-md border border-[var(--border)] bg-[var(--surface-2)] py-1.5 pl-8 pr-2 text-[13px] outline-none placeholder:text-[var(--dim)] focus:border-[var(--accent)]"
-          />
-        </label>
-        {allTags.length ? (
+        <div className="flex items-center gap-1.5">
+          <label className="relative min-w-0 flex-1">
+            <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--dim)]">
+              <IconSearch size={14} />
+            </span>
+            <input
+              type="search"
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              placeholder="搜索资产"
+              aria-label="搜索资产"
+              className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-1.5 pl-8 pr-2 text-[13px] outline-none placeholder:text-[var(--dim)] focus:border-[var(--accent)]"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() => setViewMode((v) => (v === "grid" ? "list" : "grid"))}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--dim)] hover:text-[var(--text)]"
+            aria-label={viewMode === "grid" ? "切换为列表视图" : "切换为宫格视图"}
+            title={viewMode === "grid" ? "列表视图" : "宫格视图"}
+          >
+            {viewMode === "grid" ? <IconList size={15} /> : <IconGrid size={15} />}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setManageOpen(true);
+              setManageMulti(false);
+              setSelectedIds(new Set());
+            }}
+            className="h-8 shrink-0 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-2.5 text-xs font-medium text-[var(--dim)] hover:text-[var(--text)]"
+          >
+            管理
+          </button>
+        </div>
+
+        {/* Type filter pills */}
+        <div className="flex flex-wrap items-center gap-1" role="group" aria-label="资产类型筛选">
+          {(
+            [
+              { key: "all", label: "全部" },
+              { key: "image", label: "图片" },
+              { key: "video", label: "视频" },
+              { key: "audio", label: "音频" },
+              { key: "text", label: "文本" },
+            ] as const
+          ).map((item) => {
+            const active = kindFilter === item.key;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                aria-pressed={active}
+                onClick={() => setKindFilter(item.key)}
+                className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
+                  active
+                    ? "bg-[var(--text)] font-medium text-[var(--bg)]"
+                    : "bg-[var(--surface-2)] text-[var(--dim)] hover:text-[var(--text)]"
+                }`}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+          {allTags.length ? (
+            <button
+              type="button"
+              onClick={() => setShowTags((v) => !v)}
+              aria-expanded={showTags}
+              className="ml-auto rounded-full px-2 py-0.5 text-xs text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
+            >
+              {tagFilter ? `#${tagFilter}` : "标签"}
+            </button>
+          ) : null}
+        </div>
+
+        {showTags && allTags.length ? (
           <div className="flex flex-wrap gap-1" role="group" aria-label="资产标签过滤">
             {allTags.map((tag) => (
               <button
@@ -229,14 +351,15 @@ export function AssetsTab({
             ))}
           </div>
         ) : null}
-        <div className="flex flex-wrap gap-1">
+
+        <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading}
-            className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--dim)] hover:bg-[var(--hover)] disabled:opacity-40"
+            className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)] disabled:opacity-40"
           >
-            <IconUpload size={13} /> {uploading ? "上传中…" : "上传素材"}
+            <IconUpload size={13} /> {uploading ? "上传中…" : "上传"}
           </button>
           <button
             type="button"
@@ -244,10 +367,10 @@ export function AssetsTab({
               setShowNodePicker((v) => !v);
               setShowTextForm(false);
             }}
-            className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--dim)] hover:bg-[var(--hover)]"
+            className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
             aria-expanded={showNodePicker}
           >
-            <IconBookmark size={13} /> 从画布节点存为资…
+            <IconBookmark size={13} /> 存节点
           </button>
           <button
             type="button"
@@ -255,10 +378,10 @@ export function AssetsTab({
               setShowTextForm((v) => !v);
               setShowNodePicker(false);
             }}
-            className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--dim)] hover:bg-[var(--hover)]"
+            className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
             aria-expanded={showTextForm}
           >
-            <IconPlus size={13} /> 新建文本资产
+            <IconPlus size={13} /> 建文本
           </button>
           <input
             ref={fileInputRef}
@@ -345,6 +468,22 @@ export function AssetsTab({
               ? "资产库还是空的。生成的图片 / 视频 / 音频会自动进来，也可以上传素材、把画布节点存为资产，或新建一条文本资产"
               : "没有匹配的资产"}
           </p>
+        ) : viewMode === "grid" ? (
+          <div className="grid grid-cols-2 gap-2 px-1 pt-1">
+            {filtered.map((asset) => (
+              <AssetGridCard
+                key={asset.id}
+                asset={asset}
+                manageMode={false}
+                selected={false}
+                onToggleSelect={() => undefined}
+                onPreview={() => onPreviewAsset(asset)}
+                onHover={onHoverAsset}
+                onInsert={() => onInsert(buildAssetInsertPayload(asset))}
+                onDelete={() => removeAsset.mutate(asset.id)}
+              />
+            ))}
+          </div>
         ) : (
           KIND_ORDER.map((kind) => {
             const group = filtered.filter((a) => a.kind === kind);
@@ -375,6 +514,9 @@ export function AssetsTab({
                     <AssetRow
                       key={asset.id}
                       asset={asset}
+                      manageMode={false}
+                      selected={false}
+                      onToggleSelect={() => undefined}
                       editing={editingAssetId === asset.id}
                       editTitle={assetEditTitle}
                       onEditTitleChange={setAssetEditTitle}
@@ -392,17 +534,7 @@ export function AssetsTab({
                       onCancelRename={() => setEditingAssetId(null)}
                       onPreview={() => onPreviewAsset(asset)}
                       onHover={onHoverAsset}
-                      onInsert={() =>
-                        onInsert({
-                          kind: asset.kind,
-                          title: asset.title,
-                          content: asset.content,
-                          prompt: asset.prompt,
-                          color: asset.color,
-                          assetId: asset.id,
-                          mediaBlobKey: asset.mediaBlobKey,
-                        })
-                      }
+                      onInsert={() => onInsert(buildAssetInsertPayload(asset))}
                       onDelete={() => removeAsset.mutate(asset.id)}
                     />
                   ))}
@@ -411,12 +543,403 @@ export function AssetsTab({
           })
         )}
       </div>
+      {manageOpen && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              data-ui
+              data-canvas-no-zoom
+              className="fixed inset-0 z-[75] flex flex-col bg-[var(--bg)] text-[var(--text)]"
+              role="dialog"
+              aria-modal="true"
+              aria-label="素材管理"
+            >
+              {/* Header */}
+              <div className="flex h-14 shrink-0 items-center justify-between border-b border-[var(--border)] px-5">
+                <h2 className="text-sm font-semibold">素材管理</h2>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setManageOpen(false);
+                    setManageMulti(false);
+                    setSelectedIds(new Set());
+                  }}
+                  className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
+                  aria-label="关闭素材管理"
+                >
+                  <IconX size={16} />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="flex min-h-0 flex-1">
+                {/* Left categories */}
+                <aside className="hidden w-52 shrink-0 flex-col gap-1 border-r border-[var(--border)] p-3 sm:flex">
+                  <p className="px-2 pb-1 text-xs font-medium text-[var(--dim)]">素材分类</p>
+                  {(
+                    [
+                      { key: "all", label: "全部素材", count: assets.length },
+                      { key: "image", label: "图片", count: assets.filter((a) => a.kind === "image").length },
+                      { key: "video", label: "视频", count: assets.filter((a) => a.kind === "video").length },
+                      { key: "audio", label: "音频", count: assets.filter((a) => a.kind === "audio").length },
+                      { key: "text", label: "文本", count: assets.filter((a) => a.kind === "text").length },
+                    ] as const
+                  ).map((cat) => {
+                    const active = kindFilter === cat.key;
+                    return (
+                      <button
+                        key={cat.key}
+                        type="button"
+                        onClick={() => setKindFilter(cat.key)}
+                        className={`flex items-center justify-between rounded-xl px-3 py-2 text-left text-xs transition-colors ${
+                          active
+                            ? "bg-[var(--surface-2)] font-medium text-[var(--text)]"
+                            : "text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
+                        }`}
+                      >
+                        <span>{cat.label}</span>
+                        <span className="tabular-nums">{cat.count}</span>
+                      </button>
+                    );
+                  })}
+                  {allTags.length ? (
+                    <div className="mt-4 space-y-1">
+                      <p className="px-2 pb-1 text-xs font-medium text-[var(--dim)]">标签</p>
+                      <div className="flex flex-wrap gap-1 px-1">
+                        {allTags.map((tag) => (
+                          <button
+                            key={tag}
+                            type="button"
+                            onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
+                            className="rounded-full px-2.5 py-0.5 text-xs"
+                            style={{
+                              background:
+                                tagFilter === tag ? "rgba(var(--accent-rgb),0.16)" : "var(--surface-2)",
+                              color: tagFilter === tag ? "var(--accent)" : "var(--dim)",
+                            }}
+                          >
+                            {tag}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </aside>
+
+                {/* Right main content */}
+                <main className="flex min-w-0 flex-1 flex-col p-4">
+                  <div className="flex flex-wrap items-center gap-2 pb-4">
+                    <span className="text-sm font-medium">
+                      {kindFilter === "all" ? "全部素材" : NODE_TYPE_LABEL[kindFilter]}
+                      <span className="ml-1.5 text-xs text-[var(--dim)]">({filtered.length})</span>
+                    </span>
+                    <span className="flex-1" />
+                    {manageMulti ? (
+                      <div className="flex items-center gap-1.5 text-xs">
+                        <span className="text-[var(--dim)]">已选 {selectedIds.size}</span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setSelectedIds(
+                              selectedIds.size === filtered.length
+                                ? new Set()
+                                : new Set(filtered.map((a) => a.id)),
+                            )
+                          }
+                          className="rounded-full border border-[var(--border)] px-2.5 py-1 hover:bg-[var(--hover)]"
+                        >
+                          {selectedIds.size === filtered.length && filtered.length > 0 ? "全不选" : "全选"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={selectedIds.size === 0}
+                          onClick={batchInsertSelected}
+                          className="rounded-full bg-[var(--accent)] px-3 py-1 font-medium text-[var(--accent-ink)] disabled:opacity-40"
+                        >
+                          插入画布
+                        </button>
+                        <button
+                          type="button"
+                          disabled={selectedIds.size === 0 || removeAsset.isPending}
+                          onClick={() => void batchDeleteSelected()}
+                          className="rounded-full bg-[var(--danger)] px-3 py-1 font-medium text-white disabled:opacity-40"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setManageMulti((v) => !v);
+                        setSelectedIds(new Set());
+                      }}
+                      className={`h-8 rounded-full px-3.5 text-xs font-medium transition-colors ${
+                        manageMulti
+                          ? "bg-[var(--text)] text-[var(--bg)]"
+                          : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--text)] hover:bg-[var(--hover)]"
+                      }`}
+                    >
+                      {manageMulti ? "完成" : "多选"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode((v) => (v === "grid" ? "list" : "grid"))}
+                      className="flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] text-[var(--dim)] hover:text-[var(--text)]"
+                      aria-label={viewMode === "grid" ? "切换为列表视图" : "切换为宫格视图"}
+                    >
+                      {viewMode === "grid" ? <IconList size={15} /> : <IconGrid size={15} />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={uploading}
+                      className="flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] text-[var(--dim)] hover:text-[var(--text)] disabled:opacity-40"
+                      aria-label="上传素材"
+                      title="上传素材"
+                    >
+                      <IconPlus size={15} />
+                    </button>
+                    <label className="relative w-48">
+                      <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--dim)]">
+                        <IconSearch size={14} />
+                      </span>
+                      <input
+                        type="search"
+                        value={keyword}
+                        onChange={(e) => setKeyword(e.target.value)}
+                        placeholder="在素材中搜索"
+                        aria-label="在素材中搜索"
+                        className="h-8 w-full rounded-full border border-[var(--border)] bg-[var(--surface-2)] pl-8 pr-3 text-xs outline-none placeholder:text-[var(--dim)] focus:border-[var(--accent)]"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="min-h-0 flex-1 overflow-y-auto">
+                    {filtered.length === 0 ? (
+                      <div className="flex h-full flex-col items-center justify-center gap-2 text-xs text-[var(--dim)]">
+                        <span>暂无内容</span>
+                      </div>
+                    ) : viewMode === "grid" ? (
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+                        {filtered.map((asset) => (
+                          <AssetGridCard
+                            key={asset.id}
+                            asset={asset}
+                            manageMode={manageMulti}
+                            selected={selectedIds.has(asset.id)}
+                            onToggleSelect={() => toggleSelect(asset.id)}
+                            onPreview={() => onPreviewAsset(asset)}
+                            onHover={onHoverAsset}
+                            onInsert={() => {
+                              onInsert(buildAssetInsertPayload(asset));
+                              setManageOpen(false);
+                            }}
+                            onDelete={() => removeAsset.mutate(asset.id)}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        {filtered.map((asset) => (
+                          <AssetRow
+                            key={asset.id}
+                            asset={asset}
+                            manageMode={manageMulti}
+                            selected={selectedIds.has(asset.id)}
+                            onToggleSelect={() => toggleSelect(asset.id)}
+                            editing={editingAssetId === asset.id}
+                            editTitle={assetEditTitle}
+                            onEditTitleChange={setAssetEditTitle}
+                            onStartRename={() => {
+                              setEditingAssetId(asset.id);
+                              setAssetEditTitle(asset.title);
+                            }}
+                            onCommitRename={() => {
+                              const title = assetEditTitle.trim();
+                              setEditingAssetId(null);
+                              if (title && title !== asset.title) {
+                                renameAsset.mutate({ id: asset.id, title });
+                              }
+                            }}
+                            onCancelRename={() => setEditingAssetId(null)}
+                            onPreview={() => onPreviewAsset(asset)}
+                            onHover={onHoverAsset}
+                            onInsert={() => {
+                              onInsert(buildAssetInsertPayload(asset));
+                              setManageOpen(false);
+                            }}
+                            onDelete={() => removeAsset.mutate(asset.id)}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </main>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+    </div>
+  );
+}
+
+function buildAssetInsertPayload(asset: Asset): InsertAssetPayload {
+  return {
+    mediaUrl: asset.mediaUrl ?? (isMediaUrl(asset.content) ? asset.content : null),
+    mimeType: asset.mimeType,
+    posterBlobKey: asset.posterBlobKey,
+    posterUrl: asset.posterUrl,
+    kind: asset.kind,
+    title: asset.title,
+    content: asset.content,
+    prompt: asset.prompt,
+    color: asset.color,
+    assetId: asset.id,
+    mediaBlobKey: asset.mediaBlobKey,
+  };
+}
+
+function AssetGridCard({
+  asset,
+  manageMode,
+  selected,
+  onToggleSelect,
+  onPreview,
+  onHover,
+  onInsert,
+  onDelete,
+}: {
+  asset: Asset;
+  manageMode: boolean;
+  selected: boolean;
+  onToggleSelect: () => void;
+  onPreview: () => void;
+  onHover: (asset: Asset | null) => void;
+  onInsert: () => void;
+  onDelete: () => void;
+}) {
+  const mediaUrl = asset.mediaUrl ?? (isMediaUrl(asset.content) ? asset.content : null);
+  const draggableKind = !manageMode && (asset.kind === "image" || asset.kind === "video" || asset.kind === "audio");
+  const hoverable =
+    !manageMode && (asset.kind === "image" ? Boolean(mediaUrl) : asset.kind === "video" ? Boolean(asset.posterUrl ?? mediaUrl) : false);
+
+  return (
+    <div
+      className={`group relative flex flex-col overflow-hidden rounded-xl border bg-[var(--surface-2)] transition-colors ${
+        manageMode && selected ? "border-[var(--accent)] ring-1 ring-[var(--accent)]" : "border-[var(--border)]"
+      }`}
+      draggable={draggableKind}
+      onDragStart={(e) => {
+        if (!draggableKind) return;
+        e.dataTransfer.setData(ASSET_DRAG_MIME, JSON.stringify(buildAssetInsertPayload(asset)));
+        e.dataTransfer.effectAllowed = "copy";
+        onHover(null);
+      }}
+      onMouseEnter={() => {
+        if (hoverable) onHover(asset);
+      }}
+      onMouseLeave={() => onHover(null)}
+      title={draggableKind ? `${asset.title}（可拖到画布）` : asset.title}
+    >
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={manageMode ? onToggleSelect : onPreview}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            if (manageMode) onToggleSelect();
+            else onPreview();
+          }
+        }}
+        className="relative aspect-square w-full cursor-pointer overflow-hidden bg-[var(--surface-3)]"
+      >
+        {asset.kind === "image" && mediaUrl ? (
+          <img src={mediaUrl} alt={asset.title} className="h-full w-full object-cover" />
+        ) : asset.kind === "video" && asset.posterUrl ? (
+          <>
+            <img src={asset.posterUrl} alt={asset.title} className="h-full w-full object-cover" />
+            <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-white/90">
+              <IconPlay size={22} />
+            </span>
+          </>
+        ) : asset.kind === "video" && mediaUrl ? (
+          <>
+            <video
+              src={`${mediaUrl}#t=0.1`}
+              muted
+              playsInline
+              preload="metadata"
+              className="h-full w-full bg-black object-cover"
+            />
+            <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-white/90">
+              <IconPlay size={22} />
+            </span>
+          </>
+        ) : (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-1 p-2 text-center text-xs text-[var(--dim)]">
+            <span className="rounded bg-[var(--surface)] px-1.5 py-0.5 text-[10px]">
+              {NODE_TYPE_LABEL[asset.kind]}
+            </span>
+            {asset.content ? (
+              <span className="line-clamp-3 text-[11px] leading-4">{asset.content}</span>
+            ) : null}
+          </div>
+        )}
+        {manageMode ? (
+          <span
+            className={`absolute left-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded-full border text-xs ${
+              selected
+                ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-ink)]"
+                : "border-white/70 bg-black/50 text-transparent"
+            }`}
+            aria-hidden="true"
+          >
+            <IconCheck size={12} />
+          </span>
+        ) : (
+          <div className="absolute right-1 top-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onInsert();
+              }}
+              className="flex h-6 w-6 items-center justify-center rounded-full bg-black/75 text-white hover:bg-black"
+              aria-label={`插入资产 ${asset.title} 到画布`}
+              title="插入到画布"
+            >
+              <IconInsert size={12} />
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete();
+              }}
+              className="flex h-6 w-6 items-center justify-center rounded-full bg-black/75 text-white hover:bg-[var(--danger)]"
+              aria-label={`删除资产 ${asset.title}`}
+              title="删除"
+            >
+              <IconTrash size={12} />
+            </button>
+          </div>
+        )}
+      </div>
+      <div className="flex items-center justify-between gap-1 px-2 py-1.5">
+        <span className="min-w-0 flex-1 truncate text-xs font-medium">{asset.title}</span>
+        <span className="shrink-0 text-[10px] text-[var(--dim)]">{NODE_TYPE_LABEL[asset.kind]}</span>
+      </div>
     </div>
   );
 }
 
 function AssetRow({
   asset,
+  manageMode,
+  selected,
+  onToggleSelect,
   editing,
   editTitle,
   onEditTitleChange,
@@ -429,6 +952,9 @@ function AssetRow({
   onDelete,
 }: {
   asset: Asset;
+  manageMode: boolean;
+  selected: boolean;
+  onToggleSelect: () => void;
   editing: boolean;
   editTitle: string;
   onEditTitleChange: (title: string) => void;
@@ -496,6 +1022,10 @@ function AssetRow({
   const draggableKind =
     asset.kind === "image" || asset.kind === "video" || asset.kind === "audio";
   const insertPayload: InsertAssetPayload = {
+    mediaUrl: pseudoNode.mediaUrl,
+    mimeType: asset.mimeType,
+    posterBlobKey: asset.posterBlobKey,
+    posterUrl: asset.posterUrl,
     kind: asset.kind,
     title: asset.title,
     content: asset.content,
@@ -508,8 +1038,11 @@ function AssetRow({
     "hit-40 flex h-8 w-7 shrink-0 items-center justify-center rounded text-[var(--dim)] hover:bg-[var(--hover-strong)] hover:text-[var(--text)]";
   return (
     <div
-      className="group relative flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--hover)]"
-      draggable={draggableKind && !editing}
+      className={`group relative flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--hover)] ${
+        manageMode && selected ? "bg-[var(--hover-strong)]" : ""
+      }`}
+      onClick={manageMode ? onToggleSelect : undefined}
+      draggable={!manageMode && draggableKind && !editing}
       onDragStart={(e) => {
         if (!draggableKind) return;
         e.dataTransfer.setData(ASSET_DRAG_MIME, JSON.stringify(insertPayload));

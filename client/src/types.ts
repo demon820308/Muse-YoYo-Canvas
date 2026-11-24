@@ -167,6 +167,10 @@ export type InsertAssetPayload = {
   color: string | null;
   assetId?: string;
   mediaBlobKey?: string | null;
+  mediaUrl?: string | null;
+  mimeType?: string | null;
+  posterBlobKey?: string | null;
+  posterUrl?: string | null;
 };
 
 /** dataTransfer type for dragging an asset row onto the canvas: the

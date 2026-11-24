@@ -58,7 +58,7 @@ const DEFAULT_OPTIONS: ToolOptionsState = {
   lastOffset: "0.05",
   loopAudio: true,
   reverseMode: "concise",
-  helpDismissed: false,
+  helpDismissed: true,
 };
 
 const optionsKey = (nodeId: string) => `yoyohua-bu-tool-options-v1:${nodeId}`;
@@ -87,7 +87,7 @@ export function readToolOptions(nodeId: string): ToolOptionsState {
       reverseMode: REVERSE_MODE_OPTIONS.some((o) => o.mode === parsed.reverseMode)
         ? (parsed.reverseMode as ReverseMode)
         : DEFAULT_OPTIONS.reverseMode,
-      helpDismissed: parsed.helpDismissed === true,
+      helpDismissed: parsed.helpDismissed !== false,
     };
   } catch {
     return DEFAULT_OPTIONS;

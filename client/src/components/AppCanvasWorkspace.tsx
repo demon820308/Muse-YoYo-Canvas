@@ -1,8 +1,8 @@
-import type { ComponentProps, Dispatch, RefObject, SetStateAction } from "react";
+import { useState, type ComponentProps, type Dispatch, type RefObject, type SetStateAction } from "react";
 import logoUrl from "../assets/logo.png";
 import type { computeAppViewState } from "../canvas-derived";
 import type { Viewport } from "../hooks/gesture-math";
-import { IconPlus } from "../icons";
+import { IconBookOpen, IconGrid, IconList, IconPlus } from "../icons";
 import { ASSET_DRAG_MIME, type Asset, type CanvasNode, type InsertAssetPayload } from "../types";
 import { BottomToolbarSection } from "./BottomToolbarSection";
 import { CanvasControlsOverlay } from "./CanvasControlsOverlay";
@@ -10,7 +10,7 @@ import { CanvasStage } from "./CanvasStage";
 import type { CanvasTool } from "./CanvasToolbar";
 import { DetailEditor } from "./DetailEditor";
 import { HoverMediaPreview } from "./HoverMediaPreview";
-import { SidePanel } from "./SidePanel";
+import { SidePanel, type PanelTab } from "./SidePanel";
 
 export type AppViewState = ReturnType<typeof computeAppViewState>;
 
@@ -94,31 +94,77 @@ export type AppCanvasWorkspaceProps = {
 
 export function AppCanvasWorkspace(p: AppCanvasWorkspaceProps) {
   const { view } = p;
+  const [sideTab, setSideTab] = useState<PanelTab>("assets");
+  const toggleLeftDock = (tab: PanelTab) => {
+    if (p.panelOpen && sideTab === tab) {
+      p.setPanelOpen(false);
+    } else {
+      setSideTab(tab);
+      p.setPanelOpen(true);
+    }
+  };
   return (
     <div className="relative flex min-h-0 flex-1">
+      {/* Left floating vertical pill dock (资产 / 画布 / 提示词库) */}
+      <div
+        data-ui
+        data-canvas-no-zoom
+        className="capsule-chrome absolute left-3 top-1/2 z-40 flex -translate-y-1/2 flex-col items-center gap-1 rounded-full p-1"
+        onPointerDown={(e) => e.stopPropagation()}
+        role="toolbar"
+        aria-label="左侧快捷导航"
+      >
+        {(
+          [
+            { tab: "assets" as const, label: "资产", icon: <IconGrid size={16} /> },
+            { tab: "canvas" as const, label: "画布节点", icon: <IconList size={16} /> },
+            { tab: "prompts" as const, label: "提示词库", icon: <IconBookOpen size={16} /> },
+          ]
+        ).map((item) => {
+          const active = p.panelOpen && sideTab === item.tab;
+          return (
+            <button
+              key={item.tab}
+              type="button"
+              onClick={() => toggleLeftDock(item.tab)}
+              title={item.label}
+              aria-label={item.label}
+              aria-pressed={active}
+              className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
+                active
+                  ? "bg-[var(--text)] text-[var(--bg)]"
+                  : "text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
+              }`}
+            >
+              {item.icon}
+            </button>
+          );
+        })}
+      </div>
+
       {p.panelOpen ? (
-        <div className="fixed inset-0 z-50 flex md:static md:z-auto">
-          <div className="panel-in flex max-w-[88vw]">
-            <SidePanel
-              projectId={p.projectId ?? ""}
-              nodes={p.nodes}
-              selectedNodeIds={p.selectedIds}
-              onFocusNode={p.onFocusNode}
-              onPreviewNode={p.onPreviewNode}
-              onPreviewAsset={p.onPreviewAsset}
-              onHoverNode={p.onHoverNode}
-              onHoverAsset={p.onHoverAsset}
-              onInsertAsset={p.onInsertAsset}
-              onRenameNode={(nodeId, title) => p.onUpdateNode(nodeId, { title })}
-              width={p.panelWidth}
-              onWidthChange={p.setPanelWidth}
-            />
-          </div>
-          <button
-            type="button"
-            aria-label="关闭面板"
-            className="flex-1 bg-black/50 md:hidden"
-            onClick={() => p.setPanelOpen(false)}
+        <div
+          data-ui
+          data-canvas-no-zoom
+          className="panel-in fixed inset-y-16 left-16 right-3 z-50 flex md:absolute md:inset-y-16 md:left-16 md:right-auto md:z-50 md:max-w-[calc(100vw-80px)]"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <SidePanel
+            projectId={p.projectId ?? ""}
+            nodes={p.nodes}
+            selectedNodeIds={p.selectedIds}
+            onFocusNode={p.onFocusNode}
+            onPreviewNode={p.onPreviewNode}
+            onPreviewAsset={p.onPreviewAsset}
+            onHoverNode={p.onHoverNode}
+            onHoverAsset={p.onHoverAsset}
+            onInsertAsset={p.onInsertAsset}
+            onRenameNode={(nodeId, title) => p.onUpdateNode(nodeId, { title })}
+            width={p.panelWidth}
+            onWidthChange={p.setPanelWidth}
+            activeTab={sideTab}
+            onTabChange={setSideTab}
+            onClose={() => p.setPanelOpen(false)}
           />
         </div>
       ) : null}

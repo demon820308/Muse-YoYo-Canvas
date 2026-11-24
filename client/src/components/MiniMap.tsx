@@ -2,8 +2,10 @@
 // at the user's direction: a 168x112 SVG on a dark surface panel. The
 // mapped bounds are the union of the current viewport's world rect and
 // every node's bounds, padded by 80 world units. Nodes draw as flat
-// blocks — video teal, sticky notes amber, config blue, groups slate,
-// everything else dim gray — and the viewport is an amber outline.
+// blocks by node kind (image sky-blue, video teal, text violet, audio
+// rose, config orange, tool nodes cyan, sticky notes their own color,
+// groups translucent slate underneath) — and the viewport is an amber
+// outline.
 // Pointer down / drag re-centers the main viewport on the pointed
 // world position.
 
@@ -12,20 +14,33 @@ import type { CanvasNode } from "../types";
 
 export type ViewportLike = { x: number; y: number; zoom: number };
 
-const MAP_W = 168;
+export const MINIMAP_WIDTH = 184;
+const MAP_W = MINIMAP_WIDTH;
 const MAP_H = 112;
 const BOUNDS_PAD = 80;
 
 function blockColor(node: CanvasNode): string {
   switch (node.type) {
+    case "image":
+      return "#5aa9e6";
     case "video":
       return "var(--teal)";
-    case "sticky-note":
-      return "var(--accent)";
+    case "text":
+      return "#9a7fe0";
+    case "audio":
+      return "#e66a8a";
     case "config":
-      return "#60a5fa";
+      return "#e07b4f";
+    case "sticky-note":
+      return node.color || "var(--accent)";
     case "group":
       return "#94a3b8";
+    case "video-frames":
+    case "video-relay":
+    case "audio-extract":
+    case "video-compose":
+    case "prompt-reverse":
+      return "#4fc4c9";
     default:
       return "var(--dim)";
   }
@@ -88,12 +103,10 @@ export function MiniMap({
     <div
       data-ui
       data-canvas-no-zoom
-      className="safe-bottom-offset absolute right-3 z-40 overflow-hidden rounded-xl shadow-lg"
+      className="capsule-chrome relative overflow-hidden rounded-2xl"
       style={{
         width: MAP_W,
         height: MAP_H,
-        background: "var(--surface)",
-        border: "1px solid var(--border)",
       }}
       role="img"
       aria-label="小地图"
@@ -118,8 +131,12 @@ export function MiniMap({
         onPointerUp={() => setDragging(false)}
         onPointerCancel={() => setDragging(false)}
       >
-        {nodes.map((n) => {
+        {(nodes.some((n) => n.type === "group")
+          ? [...nodes.filter((n) => n.type === "group"), ...nodes.filter((n) => n.type !== "group")]
+          : nodes
+        ).map((n) => {
           const p = toLocal(n.x, n.y);
+          const isGroup = n.type === "group";
           return (
             <rect
               key={n.id}
@@ -129,7 +146,10 @@ export function MiniMap({
               height={Math.max(2, n.height * scale)}
               rx={1.5}
               fill={blockColor(n)}
-              opacity={0.75}
+              fillOpacity={isGroup ? 0.22 : 0.85}
+              stroke={isGroup ? "#94a3b8" : "none"}
+              strokeOpacity={isGroup ? 0.55 : 0}
+              strokeWidth={isGroup ? 0.75 : 0}
             />
           );
         })}

@@ -9,7 +9,7 @@
 // suppression) also stays with App — this component renders the
 // panel for the node it is given.
 
-import type { CSSProperties, RefObject } from "react";
+import { useEffect, useRef, type CSSProperties, type RefObject } from "react";
 import { StickyPanel } from "./StickyPanel";
 import { GenerationPanel } from "./GenerationPanel";
 import { ToolPanel } from "./ToolPanel";
@@ -58,12 +58,20 @@ export function DetailEditor({
   runGeneration,
   runTool,
 }: DetailEditorProps) {
+  const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const el = textAreaRef.current;
+    if (!el || selectedNode.type !== "text") return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 280)}px`;
+  }, [selectedNode.id, selectedNode.type, selectedNode.content]);
+
   return (
     <div
       ref={detailEditorRef}
       data-ui
       data-canvas-no-zoom
-      className={`detail-editor capsule-chrome absolute z-30 flex min-h-[min(360px,72vh)] max-h-[min(560px,72vh)] w-[min(620px,94%)] flex-col overflow-y-auto rounded-[22px] p-5 ${
+      className={`detail-editor capsule-chrome absolute z-30 flex max-h-[min(560px,72vh)] w-[min(620px,94%)] flex-col overflow-y-auto rounded-[22px] p-4 ${
         panelFlash
           ? "ring-2 ring-[rgba(var(--accent-rgb),0.45)]"
           : ""
@@ -71,13 +79,9 @@ export function DetailEditor({
       style={detailEditorStyle}
       aria-label="节点编辑"
     >
-      {/* The editor's title row (name input + type label +
-       * delete) is omitted for the four tool nodes and
-       * the config node at the user's call — their panels stand
-       * alone without it. Every other node type keeps the row
-       * unchanged. */}
-      {!isToolNodeType(selectedNode.type) &&
-      selectedNode.type !== "config" ? (
+      {/* Only sticky-note keeps the header row; text, generation,
+       * and tool panels lead directly with their primary workspace. */}
+      {selectedNode.type === "sticky-note" ? (
       <div className="flex items-center gap-2 border-b border-[var(--border)] pb-3">
         <span
           className="h-2.5 w-2.5 rounded-full"
@@ -105,11 +109,13 @@ export function DetailEditor({
       ) : null}
       {selectedNode.type === "text" ? (
         <textarea
+          ref={textAreaRef}
           value={selectedNode.content}
           onChange={(e) => updateNode(selectedNode.id, { content: e.target.value })}
           aria-label="节点内容"
-          placeholder="节点内容…"
-          className="mt-2 min-h-[64px] w-full flex-1 resize-none rounded border border-[var(--border)] bg-[var(--surface-2)] px-2 py-1.5 text-sm leading-6 outline-none focus:border-[var(--accent)]"
+          placeholder="输入文本内容…"
+          rows={3}
+          className="min-h-[76px] max-h-[280px] w-full resize-none bg-transparent px-0.5 py-1 text-sm leading-6 outline-none placeholder:text-[var(--dim)]"
         />
       ) : null}
       {selectedNode.type === "image" ||

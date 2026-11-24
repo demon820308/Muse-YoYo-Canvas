@@ -241,7 +241,13 @@ export function NodeCard({
   return (
     <div
       data-node-id={node.id}
-      className="group absolute flex touch-none select-none flex-col rounded-[10px] border"
+      className={`group absolute flex touch-none select-none flex-col rounded-[10px] border ${
+        flashing
+          ? "node-focus-pulse"
+          : generating
+            ? "node-generating-glow"
+            : ""
+      }`}
       style={{
         left: node.x,
         top: node.y,
@@ -250,18 +256,17 @@ export function NodeCard({
         background: isGroup ? "rgba(var(--accent-rgb),0.05)" : "var(--surface-2)",
         borderColor: connectTarget
           ? "var(--accent)"
-          : selected
+          : selected || generating || flashing || hovered
             ? "var(--accent)"
-            : hovered || flashing
-              ? "var(--accent)"
-              : "var(--border)",
-        boxShadow: flashing
-          ? "0 0 0 3px rgba(var(--accent-rgb),0.55)"
-          : connectTarget
-            ? "0 0 0 3px rgba(var(--accent-rgb),0.45)"
-            : selected
-              ? "0 0 0 1.5px var(--accent), var(--shadow-node)"
-              : "var(--shadow-node)",
+            : "var(--border)",
+        boxShadow:
+          flashing || generating
+            ? undefined
+            : connectTarget
+              ? "0 0 0 3px rgba(var(--accent-rgb),0.45)"
+              : selected
+                ? "0 0 0 1.5px var(--accent), var(--shadow-node)"
+                : "var(--shadow-node)",
         cursor: "grab",
         zIndex: isGroup ? 1 : 2,
       }}

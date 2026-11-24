@@ -262,6 +262,7 @@ export function QueueDrawer({
   stoppingNodeId,
   onPreviewRecord,
   showToast,
+  width = 300,
 }: {
   currentProjectId: string | null;
   requests: QueueRequest[];
@@ -276,6 +277,7 @@ export function QueueDrawer({
   stoppingNodeId: string | null;
   onPreviewRecord: (record: GenerationRecord) => void;
   showToast: (message: string) => void;
+  width?: number;
 }) {
   const [tab, setTab] = useState<"queue" | "records">("queue");
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -309,7 +311,8 @@ export function QueueDrawer({
       />
       <div
         data-ui
-        className="absolute inset-y-0 right-0 flex w-[min(360px,92vw)] flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl pt-safe"
+        className="capsule-chrome absolute bottom-3 right-3 top-16 flex flex-col overflow-hidden rounded-2xl"
+        style={{ width: `min(${width}px, calc(100vw - 24px))` }}
         role="dialog"
         aria-label="生成队列"
       >

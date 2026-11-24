@@ -2,7 +2,6 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useRef, useState } from "react";
 import { api } from "../api";
 import type { EditorDialogState, ProjectDialogState } from "../components/AppDialogs";
-import { NARROW_BREAKPOINT_PX } from "../device";
 import type { CanvasNode } from "../types";
 import { useAppearance } from "./use-appearance";
 import { usePanelChrome } from "./use-panel-chrome";
@@ -10,9 +9,7 @@ import { useDismissOnOutside } from "./use-project-sync";
 
 /** Manages workspace chrome, menus, dialogs, and toast notifications. */
 export function useWorkspaceUi() {
-  const [panelOpen, setPanelOpen] = useState<boolean>(
-    () => typeof window === "undefined" || window.innerWidth >= NARROW_BREAKPOINT_PX,
-  );
+  const [panelOpen, setPanelOpen] = useState(false);
   const [panelWidth, setPanelWidth] = useState<number>(() => {
     try {
       const saved = Number(localStorage.getItem("yoyohua-bu-panel-width"));

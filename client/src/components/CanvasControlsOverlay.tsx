@@ -1,6 +1,6 @@
 import type { Viewport } from "../hooks/gesture-math";
 import type { CanvasNode } from "../types";
-import { MiniMap } from "./MiniMap";
+import { MiniMap, MINIMAP_WIDTH } from "./MiniMap";
 import { ZoomControls } from "./ZoomControls";
 
 export function CanvasControlsOverlay(props: {
@@ -39,9 +39,12 @@ export function CanvasControlsOverlay(props: {
   return (
     <>
       {!keyboardUp ? (
-        <>
+        <div
+          className="safe-bottom-offset absolute left-3 z-40 flex flex-col gap-2"
+          style={{ width: MINIMAP_WIDTH }}
+        >
           <ZoomControls scale={viewport.zoom} onScaleChange={zoomTo} onFit={fitView} />
-          <div className="hidden sm:contents">
+          <div className="hidden sm:block">
             <MiniMap
               nodes={visibleNodes}
               viewport={viewport}
@@ -49,7 +52,7 @@ export function CanvasControlsOverlay(props: {
               onViewportChange={(next) => applyViewport(next)}
             />
           </div>
-        </>
+        </div>
       ) : null}
       {tapConnect ? (
         <div

@@ -104,7 +104,7 @@ const ALLOWED_EXTS = new Set([
   ".ogg",
 ]);
 
-export const MAX_BYTES = 64 * 1024 * 1024;
+export const MAX_BYTES = 256 * 1024 * 1024;
 export const MAX_PACKAGE_BYTES = 512 * 1024 * 1024;
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -370,12 +370,23 @@ export const filesHandlers = {
     projectDir?: string;
     fileName: string;
   }) => {
-    let bytes: Buffer;
+    const { root, objectPath } = resolveBlobObjectPath(args.spaceDir, args.blobKey);
+    let info;
     try {
-      bytes = await readBlobObjectBytes(args.spaceDir, args.blobKey);
-    } catch (err) {
+      info = await stat(objectPath);
+    } catch {
       throw new Error(
-        `mirrorBlobToFile: ${err instanceof Error ? err.message : String(err)}`,
+        `mirrorBlobToFile: blob object not found for key "${args.blobKey}" (root: ${root}, object: ${objectPath})`,
+      );
+    }
+    if (!info.isFile() || info.size === 0) {
+      throw new Error(
+        `mirrorBlobToFile: blob object not found for key "${args.blobKey}" (root: ${root}, object: ${objectPath})`,
+      );
+    }
+    if (info.size > MAX_BYTES) {
+      throw new Error(
+        `mirrorBlobToFile: blob exceeds ${Math.round(MAX_BYTES / (1024 * 1024))}MB cap`,
       );
     }
     const dir = projectDirPath(args.dirName, args.projectDir);
@@ -389,8 +400,8 @@ export const filesHandlers = {
     }
     await mkdir(dir, { recursive: true });
     const full = resolve(dir, name);
-    await writeFile(full, bytes);
-    return { path: full, sizeBytes: bytes.byteLength };
+    await copyFile(objectPath, full);
+    return { path: full, sizeBytes: info.size };
   },
   importMediaFile: async (args: {
     fromPath: string;

@@ -27,6 +27,7 @@ export type BridgeProfile = {
   label: string;
   token: string;
   createdAt: number;
+  everConnectedAt?: number | null;
 };
 
 export type BridgeProfilesFile = {
@@ -49,6 +50,7 @@ function sanitizeProfile(raw: unknown): BridgeProfile | null {
     label: typeof p.label === "string" && p.label.trim() ? p.label.trim() : "未命名账号",
     token: p.token.trim(),
     createdAt: typeof p.createdAt === "number" ? p.createdAt : 0,
+    everConnectedAt: typeof p.everConnectedAt === "number" ? p.everConnectedAt : null,
   };
 }
 
@@ -140,9 +142,41 @@ export function effectiveProfiles(): EffectiveBridgeProfiles {
 }
 
 const lastSeenByProfile = new Map<string, number>();
+const processStartedAt = Date.now();
+let lastInvalidTokenAt: number | null = null;
+let lastInactiveVisit: { profileId: string; label: string; at: number } | null = null;
 
 export function touchProfile(id: string): void {
-  lastSeenByProfile.set(id, Date.now());
+  const now = Date.now();
+  lastSeenByProfile.set(id, now);
+  lastInvalidTokenAt = null;
+  if (id === ENV_PROFILE_ID) return;
+  const file = readProfilesFile();
+  const target = file.profiles.find((p) => p.id === id);
+  if (target && !target.everConnectedAt) {
+    target.everConnectedAt = now;
+    try {
+      writeProfilesFile(file);
+    } catch {
+      // 持久化失败不阻断本次鉴权
+    }
+  }
+}
+
+export function recordInvalidToken(): void {
+  lastInvalidTokenAt = Date.now();
+}
+
+export function recordInactiveVisit(profile: BridgeProfile): void {
+  lastInactiveVisit = { profileId: profile.id, label: profile.label, at: Date.now() };
+}
+
+export function getBridgeTelemetry() {
+  return {
+    processStartedAt,
+    lastInvalidTokenAt,
+    lastInactiveVisit,
+  };
 }
 
 /** 最近一次带对令牌来访的时间（内存记录，重启丢失）；从未 → null。*/

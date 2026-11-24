@@ -10,6 +10,7 @@
 // the canvas detail editor's eye toggle.
 
 import { useState, type PointerEvent as ReactPointerEvent } from "react";
+import { IconX } from "../icons";
 import type {
   Asset,
   CanvasNode,
@@ -19,7 +20,7 @@ import { AssetsTab } from "./AssetsTab";
 import { CanvasNodesTab } from "./CanvasNodesTab";
 import { PromptsTab } from "./PromptsTab";
 
-type PanelTab = "canvas" | "assets" | "prompts";
+export type PanelTab = "canvas" | "assets" | "prompts";
 
 export type SidePanelProps = {
   /** The project currently open on the canvas. The asset library is
@@ -42,13 +43,21 @@ export type SidePanelProps = {
   onRenameNode: (nodeId: string, title: string) => void;
   width: number;
   onWidthChange: (width: number) => void;
+  activeTab?: PanelTab;
+  onTabChange?: (tab: PanelTab) => void;
+  onClose?: () => void;
 };
 
 const PANEL_MIN = 240;
 const PANEL_MAX = 520;
 
 export function SidePanel(props: SidePanelProps) {
-  const [tab, setTab] = useState<PanelTab>("canvas");
+  const [localTab, setLocalTab] = useState<PanelTab>("canvas");
+  const tab = props.activeTab ?? localTab;
+  const setTab = (next: PanelTab) => {
+    setLocalTab(next);
+    props.onTabChange?.(next);
+  };
   const [resizing, setResizing] = useState(false);
 
   const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -76,20 +85,24 @@ export function SidePanel(props: SidePanelProps) {
 
   return (
     <aside
-      className="relative flex h-full shrink-0 flex-col overflow-hidden border-r border-[var(--border)] bg-[var(--surface)] text-[var(--text)]"
+      className="capsule-chrome relative flex h-full shrink-0 flex-col overflow-hidden rounded-2xl text-[var(--text)]"
       style={{ width: props.width }}
       aria-label="画布侧边面板"
     >
-      {/* The panel rises to the full screen height, flush with the
-       * left edge; its tab row sits at the very top of the panel in
-       * the same 56px row as the floating top cluster — on desktop
-       * the cluster shifts to the panel's right edge, so the tabs
-       * need no clearance below it and the content starts right
-       * under this row. */}
-      <div className="flex h-14 shrink-0 items-center gap-5 px-4">
+      <div className="flex h-12 shrink-0 items-center gap-4 border-b border-[var(--border)] px-4">
         <TabButton label="资产" active={tab === "assets"} onClick={() => setTab("assets")} />
         <TabButton label="画布" active={tab === "canvas"} onClick={() => setTab("canvas")} />
         <TabButton label="提示词库" active={tab === "prompts"} onClick={() => setTab("prompts")} />
+        {props.onClose ? (
+          <button
+            type="button"
+            onClick={props.onClose}
+            className="ml-auto flex h-7 w-7 items-center justify-center rounded-full text-[var(--dim)] hover:bg-[var(--hover)] hover:text-[var(--text)]"
+            aria-label="关闭侧边面板"
+          >
+            <IconX size={15} />
+          </button>
+        ) : null}
       </div>
       <div className="mt-2 min-h-0 flex-1 overflow-hidden">
         {tab === "canvas" ? (

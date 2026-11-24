@@ -78,6 +78,7 @@ export function ChipPromptInput({
   ariaLabel,
   placeholder,
   expanded,
+  minimal = false,
 }: {
   value: string;
   references: ReferenceInfo[];
@@ -87,6 +88,8 @@ export function ChipPromptInput({
    * uses the composer's own wording). */
   placeholder?: string;
   expanded?: boolean;
+  /** Streamlined borderless surface used inside GenerationPanel. */
+  minimal?: boolean;
 }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   const lastEmittedRef = useRef<string | null>(null);
@@ -217,26 +220,38 @@ export function ChipPromptInput({
         data-placeholder={placeholder ?? "输入提示词，打 @ 引用已连入的节点…"}
         onInput={handleInput}
         onBlur={() => window.setTimeout(() => setMenuOpen(false), 150)}
-        className={`${expanded ? "min-h-[160px] max-h-[300px]" : "h-[64px]"} w-full overflow-y-auto whitespace-pre-wrap rounded border border-[var(--border)] bg-[var(--surface-2)] px-2 py-1.5 text-sm leading-6 outline-none focus:border-[var(--accent)] empty:before:text-[var(--dim)] empty:before:content-[attr(data-placeholder)]`}
+        className={`${
+          expanded
+            ? "min-h-[160px] max-h-[300px]"
+            : minimal
+              ? "min-h-[76px] max-h-[280px]"
+              : "h-[64px]"
+        } w-full overflow-y-auto whitespace-pre-wrap ${
+          minimal
+            ? "bg-transparent px-0.5 py-1"
+            : "rounded border border-[var(--border)] bg-[var(--surface-2)] px-2 py-1.5 focus:border-[var(--accent)]"
+        } text-sm leading-6 outline-none empty:before:text-[var(--dim)] empty:before:content-[attr(data-placeholder)]`}
       />
-      <div className="mt-1 flex items-center gap-2">
-        <button
-          type="button"
-          disabled={references.length === 0}
-          onClick={() => {
-            mentionAnchorRef.current = null;
-            setMenuOpen((v) => !v);
-          }}
-          className="rounded px-2 py-0.5 text-xs text-[var(--accent)] hover:bg-[var(--hover)] disabled:opacity-40"
-          aria-label="引用已连入的节点"
-          aria-expanded={menuOpen}
-        >
-          @ 引用节点
-        </button>
-        <span className="text-[11px] text-[var(--dim)]">
-          {references.length ? `可引用 ${references.length} 个连入节点` : "尚无连入节点可引用"}
-        </span>
-      </div>
+      {!minimal ? (
+        <div className="mt-1 flex items-center gap-2">
+          <button
+            type="button"
+            disabled={references.length === 0}
+            onClick={() => {
+              mentionAnchorRef.current = null;
+              setMenuOpen((v) => !v);
+            }}
+            className="rounded px-2 py-0.5 text-xs text-[var(--accent)] hover:bg-[var(--hover)] disabled:opacity-40"
+            aria-label="引用已连入的节点"
+            aria-expanded={menuOpen}
+          >
+            @ 引用节点
+          </button>
+          <span className="text-[11px] text-[var(--dim)]">
+            {references.length ? `可引用 ${references.length} 个连入节点` : "尚无连入节点可引用"}
+          </span>
+        </div>
+      ) : null}
       {menuOpen && references.length > 0 ? (
         <ul
           className="absolute bottom-full left-0 z-40 mb-1 max-h-56 w-64 overflow-auto rounded-lg border border-[var(--border)] bg-[var(--surface-3)] p-1 shadow-2xl"

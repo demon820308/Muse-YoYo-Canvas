@@ -158,32 +158,53 @@ export const mediaVideoHandlers = {
     if (!info.isFile()) throw new Error("probeMediaFile: not a file");
     let width: number | null = null;
     let height: number | null = null;
+    let durationSeconds: number | null = null;
     try {
       const { stdout } = await execFileAsync(
         FFPROBE_BIN,
         [
           "-v",
           "error",
-          "-select_streams",
-          "v:0",
           "-show_entries",
-          "stream=width,height",
+          "stream=codec_type,width,height:format=duration",
           "-of",
-          "csv=p=0",
+          "json",
           full,
         ],
         { timeout: 30_000 },
       );
-      const parts = stdout.trim().split(",").map((v) => Number.parseInt(v, 10));
-      const w = parts[0];
-      const h = parts[1];
-      if (w != null && Number.isFinite(w) && w > 0) width = w;
-      if (h != null && Number.isFinite(h) && h > 0) height = h;
+      const parsed = JSON.parse(stdout) as {
+        streams?: Array<{ codec_type?: string; width?: number; height?: number }>;
+        format?: { duration?: string | number };
+      };
+      const streams = parsed.streams ?? [];
+      const videoStream =
+        streams.find((s) => s.codec_type === "video" && s.width && s.height) ??
+        streams.find((s) => s.width && s.height);
+      if (
+        videoStream?.width != null &&
+        Number.isFinite(videoStream.width) &&
+        videoStream.width > 0 &&
+        videoStream?.height != null &&
+        Number.isFinite(videoStream.height) &&
+        videoStream.height > 0
+      ) {
+        width = Math.trunc(videoStream.width);
+        height = Math.trunc(videoStream.height);
+      }
+      const rawDur = parsed.format?.duration;
+      const dur =
+        typeof rawDur === "number"
+          ? rawDur
+          : typeof rawDur === "string"
+            ? Number.parseFloat(rawDur)
+            : Number.NaN;
+      if (Number.isFinite(dur) && dur > 0) durationSeconds = dur;
     } catch {
       width = null;
       height = null;
+      durationSeconds = null;
     }
-    const durationSeconds = await probeDurationSeconds(full);
     return { width, height, durationSeconds };
   },
   extractFrames: async (args: {

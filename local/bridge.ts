@@ -45,8 +45,13 @@ import {
   getProjectRow,
 } from "../server/src/actions/graph-helpers";
 import { expandHome } from "../server/src/actions/project-dirs";
-import { authenticateBridge } from "./bridge-profiles";
+import {
+  authenticateBridge,
+  recordInactiveVisit,
+  recordInvalidToken,
+} from "./bridge-profiles";
 import { PROJECTS_DIR } from "./config";
+import { settleAgentBridgeTurn } from "./agent";
 import type { LocalDb } from "./db";
 
 const MAX_RESULT_BYTES = 256 * 1024 * 1024;
@@ -148,6 +153,7 @@ export async function handleBridge(
     return json({ error: "bridge_not_configured" }, 503);
   }
   if (auth.state === "invalid") {
+    recordInvalidToken();
     return json({ error: "invalid_bridge_token" }, 401);
   }
   const isActive = auth.isActive;
@@ -155,7 +161,10 @@ export async function handleBridge(
   const path = url.pathname;
 
   if (req.method === "GET" && path === "/bridge/pending") {
-    if (!isActive) return json({ jobs: [], inactive: true });
+    if (!isActive) {
+      recordInactiveVisit(auth.profile);
+      return json({ jobs: [], inactive: true });
+    }
     const jobs = await listPendingBridgeJobs(db);
     return json({ jobs: jobs.map(jobWire) });
   }
@@ -247,6 +256,14 @@ export async function handleBridge(
       }
     }
     const settled = await settleBridgeJob(db, job.jobId, "failed", error);
+    try {
+      const payload = JSON.parse(job.payload) as { agentTurnId?: string };
+      if (payload.agentTurnId) {
+        settleAgentBridgeTurn(payload.agentTurnId, { ok: false, error });
+      }
+    } catch {
+      // ignore invalid payload
+    }
     return json({ jobId: job.jobId, status: settled?.status ?? "failed" });
   }
 
@@ -279,20 +296,25 @@ async function handleResult(req: Request, deps: Deps, db: Db): Promise<Response>
   if (job.status === "failed") {
     return json({ jobId, status: "failed", duplicate: true });
   }
-  if (!job.nodeId) return json({ error: "job_has_no_node" }, 422);
-  const node = await getNodeRow(db, job.nodeId);
-  if (!node) return json({ error: "node_not_found" }, 404);
 
   if (text !== null) {
     if (job.kind !== "text" && job.kind !== "prompt-reverse") {
       return json({ error: "job_kind_not_text" }, 422);
     }
-    let payload: { resultTitle?: string } = {};
+    let payload: { resultTitle?: string; agentTurnId?: string } = {};
     try {
-      payload = JSON.parse(job.payload) as { resultTitle?: string };
+      payload = JSON.parse(job.payload) as { resultTitle?: string; agentTurnId?: string };
     } catch {
       payload = {};
     }
+    if (payload.agentTurnId) {
+      await settleBridgeJob(db, jobId, "done");
+      settleAgentBridgeTurn(payload.agentTurnId, { ok: true, text });
+      return json({ jobId, status: "done", agentTurnId: payload.agentTurnId });
+    }
+    if (!job.nodeId) return json({ error: "job_has_no_node" }, 422);
+    const node = await getNodeRow(db, job.nodeId);
+    if (!node) return json({ error: "node_not_found" }, 404);
     const landedId = await attachResultNode(db, node, {
       type: "text",
       mediaBlobKey: null,
@@ -305,6 +327,10 @@ async function handleResult(req: Request, deps: Deps, db: Db): Promise<Response>
     await settleBridgeJob(db, jobId, "done");
     return json({ jobId, status: "done", resultNodeId: landedId });
   }
+
+  if (!job.nodeId) return json({ error: "job_has_no_node" }, 422);
+  const node = await getNodeRow(db, job.nodeId);
+  if (!node) return json({ error: "node_not_found" }, 404);
 
   const actionName = COMPLETE_ACTION_BY_KIND[job.kind];
   if (!actionName) return json({ error: "job_kind_not_media" }, 422);

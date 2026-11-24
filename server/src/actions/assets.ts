@@ -127,7 +127,7 @@ export const AssetsActions = {
       kind: z.enum(["image", "video", "audio"]),
       fileName: z.string().min(1).max(300),
       mimeType: z.string().max(120),
-      dataBase64: z.string().max(14_000_000),
+      dataBase64: z.string().max(350_000_000),
     }),
     response: z.object({ id: z.string() }),
     async handler(ctx, args) {
