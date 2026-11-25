@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { DialogShell } from "./DialogShell";
-import { useAgyStatus } from "../hooks/use-agy";
+import { useAgyStatus, type AgyStatus } from "../hooks/use-agy";
 
 export function AgySetupModal({
   open,
@@ -37,22 +37,25 @@ export function AgySetupModal({
   }, [open, refresh]);
 
   useEffect(() => {
-    if (!status) return;
+    if (!open || !status) return;
     setEnabled(status.enabled);
     if (status.model) {
       setSelectedModel(status.model);
-    } else if (status.models.length > 0 && !selectedModel) {
+    } else if (status.models.length > 0) {
       const preferred =
         status.models.find((m) => m.id === "gemini-3.8-flash-medium") ??
         status.models[0];
-      if (preferred) setSelectedModel(preferred.id);
+      if (preferred) setSelectedModel((cur) => cur || preferred.id);
     }
-    if (status.loggedIn && waitingLogin) {
+  }, [open, status?.enabled, status?.model, status?.models.length]);
+
+  useEffect(() => {
+    if (status?.loggedIn && waitingLogin) {
       setWaitingLogin(false);
       showToast("AGY CLI 登录成功，已解锁 Nano Banana 与本地模型");
       void queryClient.invalidateQueries({ queryKey: ["agent-config"] });
     }
-  }, [status, selectedModel, waitingLogin, showToast, queryClient]);
+  }, [status?.loggedIn, waitingLogin, showToast, queryClient]);
 
   useEffect(() => {
     if (!open || !waitingLogin) return;
@@ -133,11 +136,18 @@ export function AgySetupModal({
           model: modelToSave,
         }),
       });
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      const data = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        status?: AgyStatus;
+      };
       if (!res.ok) throw new Error(data.error ?? "保存配置失败");
       setEnabled(nextEnabled);
       if (modelToSave) setSelectedModel(modelToSave);
-      await refresh(false);
+      if (data.status) {
+        queryClient.setQueryData(["agy-status"], data.status);
+      } else {
+        await refresh(false);
+      }
       showToast(nextEnabled ? "AGY 本地引擎已保存并启用" : "AGY 本地引擎已停用");
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "保存失败");
