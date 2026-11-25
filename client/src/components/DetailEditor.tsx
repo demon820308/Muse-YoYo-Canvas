@@ -32,6 +32,7 @@ export type DetailEditorProps = {
   selectedNode: CanvasNode;
   selectedReferences: ReferenceInfo[];
   nodes: CanvasNode[];
+  inputsByNodeId?: Map<string, CanvasNode[]>;
   genBusyId: string | null;
   runFeedback: Record<string, NodeRunFeedback>;
   updateNode: (id: string, patch: Partial<CanvasNode>) => void;
@@ -49,6 +50,7 @@ export function DetailEditor({
   selectedNode,
   selectedReferences,
   nodes,
+  inputsByNodeId,
   genBusyId,
   runFeedback,
   updateNode,
@@ -127,6 +129,7 @@ export function DetailEditor({
           node={selectedNode}
           references={selectedReferences}
           candidates={nodes}
+          inputsByNodeId={inputsByNodeId}
           onPatch={(patch) => updateNode(selectedNode.id, patch)}
           onDisconnect={(edgeId) => deleteEdge(edgeId)}
           onConnectNode={(nodeId) =>

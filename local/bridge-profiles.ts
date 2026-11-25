@@ -19,8 +19,13 @@ import { DATA_DIR } from "./config";
 
 export const MAX_BRIDGE_PROFILES = 8;
 
-const BRIDGE_FILE = resolve(DATA_DIR, "bridge.json");
 const ENV_PROFILE_ID = "env";
+
+// 动态读取 YOYO_LOCAL_ROOT，避免同进程测试先缓存了 config.ts 导致写到真实 data/bridge.json
+function bridgeFilePath(): string {
+  const root = process.env.YOYO_LOCAL_ROOT?.trim();
+  return resolve(root ? resolve(root) : DATA_DIR, "bridge.json");
+}
 
 export type BridgeProfile = {
   id: string;
@@ -55,14 +60,14 @@ function sanitizeProfile(raw: unknown): BridgeProfile | null {
 }
 
 function writeProfilesFile(file: BridgeProfilesFile): void {
-  atomicWriteFileSync(BRIDGE_FILE, `${JSON.stringify(file, null, 2)}\n`);
+  atomicWriteFileSync(bridgeFilePath(), `${JSON.stringify(file, null, 2)}\n`);
 }
 
 /** 读档案文件（含旧格式迁移）。文件不存在/损坏 → 空配置。*/
 export function readProfilesFile(): BridgeProfilesFile {
   let parsed: unknown = null;
   try {
-    parsed = JSON.parse(readFileSync(BRIDGE_FILE, "utf8"));
+    parsed = JSON.parse(readFileSync(bridgeFilePath(), "utf8"));
   } catch {
     return { profiles: [], activeProfileId: null };
   }

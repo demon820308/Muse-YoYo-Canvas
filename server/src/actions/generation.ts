@@ -77,7 +77,12 @@ export const GenerationActions = {
   generateImage: defineAction({
     description:
       "Starts image generation for a node, routed by dispatchImageGeneration: when the node's normalized ratio is one of the direct channel's three tiers (16:9 / 9:16 / 1:1) and no reference media is connected, it generates synchronously in-action through the direct channel and fills the node in place in the same call; otherwise a background Muse task generates at the exact pixel size of the node's ratio tier (using connected reference images when present) and delivers via completeImageGeneration, filling the node in place.",
-    request: z.object({ projectId: z.string(), nodeId: z.string() }),
+    request: z.object({
+      projectId: z.string(),
+      nodeId: z.string(),
+      engine: z.enum(["muse", "agy"]).optional(),
+      maskMode: z.enum(["remove", "outfit", "face", "custom"]).optional(),
+    }),
     response: genResult,
     privileged: [Contracts.mirrorBlobToFile, Contracts.probeMediaFile],
     async handler(ctx, args) {
@@ -87,9 +92,20 @@ export const GenerationActions = {
         return { status: "failed" as const, error: "节点不存" };
       }
       const target = await forkSiblingForRegen(db, node);
+      if (args.engine) {
+        ctx.localAgy?.setNodeEngine(target.id, args.engine);
+      } else if (target.id !== node.id) {
+        ctx.localAgy?.copyNodeEngine(node.id, target.id);
+      }
       await markWorking(db, target.id, { genKind: "image" });
       const fresh = (await getNodeRow(db, target.id)) ?? target;
-      const result = await dispatchImageGeneration(ctx, db, fresh);
+      const result = await dispatchImageGeneration(
+        ctx,
+        db,
+        fresh,
+        args.engine,
+        args.maskMode,
+      );
       ctx.invalidateQueries();
       return { status: result.status, error: result.error };
     },
@@ -151,7 +167,12 @@ export const GenerationActions = {
   runConfigNode: defineAction({
     description:
       "Runs a config （生成配置） node: gathers its chip prompt and connected reference images/videos/audios/text (groups flattened) and generates by the node's mode （生图/文本/视频/音频） attaching the result as a new node beside it.",
-    request: z.object({ projectId: z.string(), nodeId: z.string() }),
+    request: z.object({
+      projectId: z.string(),
+      nodeId: z.string(),
+      engine: z.enum(["muse", "agy"]).optional(),
+      maskMode: z.enum(["remove", "outfit", "face", "custom"]).optional(),
+    }),
     response: genResult,
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
@@ -159,9 +180,20 @@ export const GenerationActions = {
       if (!node || node.projectId !== args.projectId || node.type !== "config") {
         return { status: "failed" as const, error: "配置节点不存" };
       }
+      if (args.engine) {
+        ctx.localAgy?.setNodeEngine(node.id, args.engine);
+      }
+      const effectiveEngine =
+        args.engine ?? ctx.localAgy?.getNodeEngine(node.id) ?? "muse";
       await markWorking(db, node.id, { genKind: node.genMode ?? "image" });
       const fresh = (await getNodeRow(db, node.id)) ?? node;
-      const result = await dispatchConfigGeneration(ctx, db, fresh);
+      const result = await dispatchConfigGeneration(
+        ctx,
+        db,
+        fresh,
+        effectiveEngine,
+        args.maskMode,
+      );
       ctx.invalidateQueries();
       return { status: result.status, error: result.error };
     },
@@ -183,6 +215,7 @@ export const GenerationActions = {
           reverseMode: z
             .enum(["concise", "chinese", "detailed", "english", "grid"])
             .optional(),
+          engine: z.enum(["muse", "agy"]).optional(),
         })
         .optional(),
     }),
@@ -204,6 +237,9 @@ export const GenerationActions = {
       const node = await getNodeRow(db, args.nodeId);
       if (!node || node.projectId !== args.projectId || !TOOL_TYPES.has(node.type)) {
         return { status: "failed" as const, error: "工具节点不存" };
+      }
+      if (args.options?.engine) {
+        ctx.localAgy?.setNodeEngine(node.id, args.options.engine);
       }
       await markWorking(db, node.id, { genKind: "tool" });
       const fresh = (await getNodeRow(db, node.id)) ?? node;
@@ -228,7 +264,11 @@ export const GenerationActions = {
   enqueueGeneration: defineAction({
     description:
       "Marks a node as queued for generation; the queue consumer (processQueue) claims and runs it. Config nodes run in their configured mode.",
-    request: z.object({ projectId: z.string(), nodeId: z.string() }),
+    request: z.object({
+      projectId: z.string(),
+      nodeId: z.string(),
+      engine: z.enum(["muse", "agy"]).optional(),
+    }),
     response: okResponse,
     handler: async (ctx, args): Promise<z.infer<typeof okResponse>> => {
       const db = ctx.db<typeof schema>();
@@ -240,6 +280,11 @@ export const GenerationActions = {
         throw new Error("enqueueGeneration: 工具节点不进生成队列，请在节点上点运");
       }
       const target = await forkSiblingForRegen(db, node);
+      if (args.engine) {
+        ctx.localAgy?.setNodeEngine(target.id, args.engine);
+      } else if (target.id !== node.id) {
+        ctx.localAgy?.copyNodeEngine(node.id, target.id);
+      }
       await db
         .update(schema.canvasNodes)
         .set({
@@ -517,6 +562,9 @@ export const GenerationActions = {
             updatedAt: new Date(),
           })
           .where(eq(schema.canvasNodes.id, node.id));
+        if (node.genTaskId?.startsWith("agy-")) {
+          ctx.localAgy?.cancelTask(node.genTaskId);
+        }
         await cancelNodeBridgeJobs(db, node.id);
         ctx.invalidateQueries();
       }
@@ -560,7 +608,7 @@ export const GenerationActions = {
 // completeAudioGeneration (declared as a hoisted function so the three
 // actions above can share one implementation).
 
-async function deliverGeneratedFile(
+export async function deliverGeneratedFile(
   ctx: Ctx,
   db: Db,
   args: { nodeId: string; filePath: string; title?: string },
@@ -612,6 +660,31 @@ async function deliverGeneratedFile(
     const blobKey = `media/${node.projectId}/${resultId}`;
     const bytes = Buffer.from(file.dataBase64, "base64");
     await ctx.blobs.put(blobKey, bytes, { contentType: file.contentType });
+    // Grab the poster before landing the node so genStatus="done" and
+    // posterBlobKey hit the DB together (no black-card poll window).
+    const targetNodeId = node.type === kind ? node.id : resultId;
+    let posterBlobKey: string | null = null;
+    if (kind === "video" && project && isInProjectDir(project, args.filePath)) {
+      try {
+        const run = await ctx.executePrivileged(Contracts.makePoster, {
+          input: args.filePath,
+          outputDir: expandHome(project.workspaceDir),
+          posterName: `poster-${targetNodeId.slice(0, 8)}.jpg`,
+        });
+        if (run.posterPath) {
+          const posterFile = await ctx.executePrivileged(Contracts.readMediaFile, {
+            path: run.posterPath,
+          });
+          const key = `media/${node.projectId}/${targetNodeId}-poster`;
+          await ctx.blobs.put(key, Buffer.from(posterFile.dataBase64, "base64"), {
+            contentType: "image/jpeg",
+          });
+          posterBlobKey = key;
+        }
+      } catch {
+        // Poster is a stand-in still, not part of the delivery.
+      }
+    }
     const defaultTitle =
       kind === "image"
         ? "生成图片"
@@ -632,19 +705,20 @@ async function deliverGeneratedFile(
       mimeType: file.contentType,
       filePath: expandHome(args.filePath),
       genSize,
+      posterBlobKey,
       title: resultTitle,
       content: "",
       prompt: resultPrompt,
     });
     if (kind === "video") {
-      // Poster frame for the node that now carries the video.
-      // Best-effort: a failed grab never fails the delivery 
-      // playback uses the original.
-      try {
-        const landedRow = await getNodeRow(db, landedId);
-        if (landedRow) await ensurePoster(ctx, db, landedRow);
-      } catch {
-        // Poster is a stand-in still, not part of the delivery.
+      // Fallback if pre-landing poster grab failed or project was missing.
+      if (!posterBlobKey) {
+        try {
+          const landedRow = await getNodeRow(db, landedId);
+          if (landedRow) await ensurePoster(ctx, db, landedRow);
+        } catch {
+          // Poster is a stand-in still, not part of the delivery.
+        }
       }
       // Playback proxy (V1): a lightweight H.264 twin for smooth
       // in-app WebView playback. Best-effort exactly like the poster:

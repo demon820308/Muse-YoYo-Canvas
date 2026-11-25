@@ -36,6 +36,16 @@ import {
   type ReferenceInfo,
 } from "../types";
 import { RatioSelect } from "./RatioSelect";
+import { useAgyStatus, type AgyEngine } from "../hooks/use-agy";
+import {
+  closestImageRatio,
+  getMaskEditModeMeta,
+  MASK_EDIT_MODES,
+  parseGenSize,
+  readNodeMaskMode,
+  writeNodeMaskMode,
+  type MaskEditMode,
+} from "./mask-helpers";
 
 
 // Generation panel for image / video / audio / config nodes, shaped
@@ -57,6 +67,7 @@ export function GenerationPanel({
   node,
   references,
   candidates,
+  inputsByNodeId,
   onPatch,
   onDisconnect,
   onConnectNode,
@@ -68,6 +79,7 @@ export function GenerationPanel({
   references: ReferenceInfo[];
   /** Other canvas nodes the + tile can connect in as references. */
   candidates: CanvasNode[];
+  inputsByNodeId?: Map<string, CanvasNode[]>;
   onPatch: (patch: Partial<CanvasNode>) => void;
   onDisconnect: (edgeId: string) => void;
   onConnectNode: (nodeId: string) => void;
@@ -75,8 +87,65 @@ export function GenerationPanel({
   busy: boolean;
   feedback?: NodeRunFeedback;
 }) {
+  const agy = useAgyStatus();
   const isConfig = node.type === "config";
   const mode: GenMode = isConfig ? (node.genMode ?? "image") : node.type === "video" ? "video" : node.type === "audio" ? "audio" : "image";
+  const maskRef =
+    mode === "image"
+      ? references.find((r) => r.node.type === "image-mask") ?? null
+      : null;
+  const [maskMode, setMaskMode] = useState<MaskEditMode>(() =>
+    readNodeMaskMode(node.id),
+  );
+  useEffect(() => {
+    setMaskMode(readNodeMaskMode(node.id));
+  }, [node.id]);
+  const selectMaskMode = (next: MaskEditMode) => {
+    setMaskMode(next);
+    writeNodeMaskMode(node.id, next);
+  };
+  const maskUpstreams = maskRef ? inputsByNodeId?.get(maskRef.node.id) ?? [] : [];
+  const maskUpstreamBase =
+    maskUpstreams.find((u) => u.type === "image" && Boolean(u.mediaUrl)) ?? null;
+  const imageRefs = references.filter((r) => r.node.type === "image");
+  const directBaseRef = maskRef
+    ? (maskUpstreamBase
+        ? imageRefs.find((r) => r.node.id === maskUpstreamBase.id) ?? null
+        : imageRefs[0] ?? null)
+    : null;
+  const autoBaseNode = maskRef && !directBaseRef ? maskUpstreamBase : null;
+  const baseId = directBaseRef?.node.id ?? autoBaseNode?.id ?? null;
+  const extraMaskRefImages = maskRef
+    ? imageRefs.filter((r) => r.node.id !== baseId)
+    : [];
+  const activeMaskModeMeta = getMaskEditModeMeta(maskMode);
+  const maskTargetRatio = (() => {
+    if (!maskRef) return null;
+    const srcNode = maskUpstreamBase ?? directBaseRef?.node ?? null;
+    if (srcNode) {
+      const parsed = parseGenSize(srcNode.genSize);
+      if (parsed) return closestImageRatio(parsed.w, parsed.h);
+      if (srcNode.genRatio) return srcNode.genRatio;
+      if (srcNode.width > 0 && srcNode.height > 0) {
+        return closestImageRatio(srcNode.width, srcNode.height);
+      }
+    }
+    const maskParsed = parseGenSize(maskRef.node.genSize);
+    return maskParsed ? closestImageRatio(maskParsed.w, maskParsed.h) : null;
+  })();
+  const autoMaskRatioKeyRef = useRef<string>("");
+  useEffect(() => {
+    if (!maskRef || !maskTargetRatio || node.mediaUrl) {
+      if (!maskRef) autoMaskRatioKeyRef.current = "";
+      return;
+    }
+    const key = `${node.id}:${maskRef.node.id}:${maskTargetRatio}`;
+    if (autoMaskRatioKeyRef.current === key) return;
+    autoMaskRatioKeyRef.current = key;
+    if (node.genRatio !== maskTargetRatio) {
+      onPatch({ genRatio: maskTargetRatio });
+    }
+  }, [node.id, node.genRatio, node.mediaUrl, maskRef, maskTargetRatio, onPatch]);
   const showRatio = mode === "image" || mode === "video";
   // Video placeholder nodes get ratio + duration inlined into the
   // bottom bar (where the params summary chip used to sit) — no
@@ -164,22 +233,30 @@ export function GenerationPanel({
           ? "音频生成"
           : "文本生成";
   const promptPlaceholder =
-    mode === "image"
-      ? "描述要生成的图片内容"
-      : mode === "video"
-        ? "描述要生成的视频内容"
-        : mode === "audio"
-          ? "描述要生成的音频内容"
-          : "描述要生成的内容";
+    maskRef
+      ? activeMaskModeMeta.placeholder
+      : mode === "image"
+        ? "描述要生成的图片内容"
+        : mode === "video"
+          ? "描述要生成的视频内容"
+          : mode === "audio"
+            ? "描述要生成的音频内容"
+            : "描述要生成的内容";
   const sendLabel =
     node.genStatus === "queued"
       ? "立即生成"
       : node.genStatus === "failed"
         ? "重新生成"
         : "生成";
-  // Config nodes follow the reference gate: no composer content and
-  // no connected input (audio mode: no text input) → no send.
+  // Config nodes follow the reference gate; when an image-mask is connected,
+  // remove mode permits empty prompts and outfit/face permit ref-only runs.
+  const maskAllowsEmptyPrompt =
+    Boolean(maskRef) &&
+    (maskMode === "remove" ||
+      ((maskMode === "outfit" || maskMode === "face") &&
+        extraMaskRefImages.length > 0));
   const configCanGenerate =
+    maskAllowsEmptyPrompt ||
     !isConfig ||
     node.prompt.trim().length > 0 ||
     (mode === "audio"
@@ -213,11 +290,20 @@ export function GenerationPanel({
             const Icon = NODE_TYPE_ICON[ref.node.type];
             const label = labelById.get(ref.node.id) ?? ref.node.title;
             const thumb =
-              ref.node.type === "image"
+              ref.node.type === "image" || ref.node.type === "image-mask"
                 ? ref.node.mediaUrl
                 : ref.node.type === "video"
                   ? ref.node.posterUrl
                   : null;
+            const roleTag = maskRef
+              ? ref.node.id === maskRef.node.id
+                ? "蒙版"
+                : ref.node.id === directBaseRef?.node.id
+                  ? "底图"
+                  : ref.node.type === "image"
+                    ? "参考"
+                    : null
+              : null;
             return (
               <div
                 key={`${ref.edgeId}:${ref.node.id}`}
@@ -244,6 +330,11 @@ export function GenerationPanel({
                     </span>
                   </span>
                 )}
+                {roleTag ? (
+                  <span className="pointer-events-none absolute bottom-0 left-0 right-0 bg-black/70 px-0.5 text-center text-[9px] leading-3 text-white">
+                    {roleTag}
+                  </span>
+                ) : null}
                 <button
                   type="button"
                   onClick={(e) => {
@@ -327,6 +418,48 @@ export function GenerationPanel({
           {expanded ? <IconMinimize size={15} /> : <IconMaximize size={15} />}
         </button>
       </div>
+
+      {/* ------------------------------------------------ mask modes (only when an image-mask is connected) */}
+      {maskRef ? (
+        <div className="space-y-1 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1" role="group" aria-label="蒙版改图模式">
+              {MASK_EDIT_MODES.map((m) => (
+                <button
+                  key={m.mode}
+                  type="button"
+                  onClick={() => selectMaskMode(m.mode)}
+                  aria-pressed={maskMode === m.mode}
+                  className={`rounded-lg px-2.5 py-1 text-xs transition-colors ${
+                    maskMode === m.mode
+                      ? "bg-[var(--accent)] font-medium text-[var(--accent-ink)]"
+                      : "bg-[var(--surface-3)] text-[var(--dim)] hover:text-[var(--text)]"
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            {autoBaseNode ? (
+              <span
+                className="max-w-[160px] truncate text-[11px] text-[var(--dim)]"
+                title={`自动关联蒙版上游原图：${autoBaseNode.title}`}
+              >
+                原图：{autoBaseNode.title}
+              </span>
+            ) : null}
+          </div>
+          {!maskRef.node.mediaUrl ? (
+            <p className="text-[11px] text-[#fbbf24]">
+              连入的蒙版尚未绘制，请先在蒙版节点上点击「绘制蒙版」。
+            </p>
+          ) : activeMaskModeMeta.tip ? (
+            <p className="text-[11px] leading-4 text-[var(--dim)]">
+              {activeMaskModeMeta.tip}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* ------------------------------------------------ prompt input */}
       <div>
@@ -420,6 +553,37 @@ export function GenerationPanel({
             onChange={(r) => onPatch({ genRatio: r })}
             showSize
           />
+        ) : null}
+        {mode === "image" || (isConfig && mode === "text") ? (
+          <select
+            value={agy.effectiveEngineFor(
+              node.id,
+              node.type === "image" ? "agy" : "muse",
+            )}
+            onChange={(e) => {
+              const next = e.target.value as AgyEngine;
+              void agy.setNodeEngine(node.id, next);
+            }}
+            aria-label="选择生成通道"
+            title={
+              agy.ready
+                ? "选择本节点走 Muse 桥或本地 AGY"
+                : "需先在顶部「AGY 引擎」完成部署、登录并启用后才可切换"
+            }
+            className="h-9 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2.5 text-xs text-[var(--text)] outline-none focus:border-[var(--accent)]"
+          >
+            <option value="muse">
+              {node.type === "image" && agy.ready ? "Muse 桥" : "Muse 桥（默认）"}
+            </option>
+            <option value="agy" disabled={!agy.ready}>
+              {mode === "image"
+                ? `Nano Banana · AGY${node.type === "image" && agy.ready ? "（默认）" : ""}`
+                : agy.ready
+                  ? `${agy.shortModelName} · AGY`
+                  : "AGY"}
+              {!agy.ready ? "（未就绪）" : ""}
+            </option>
+          </select>
         ) : null}
         {!inlineVideoParams && (!inlineImageParams || isConfig) ? (
           <button

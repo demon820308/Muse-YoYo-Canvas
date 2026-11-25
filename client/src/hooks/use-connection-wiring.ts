@@ -22,7 +22,11 @@ import {
   resolveConnection,
 } from "../canvas-geometry";
 import type { ConnectCreateType } from "../components/CanvasMenus";
-import { NODE_DEFAULTS, newId } from "./use-node-ops";
+import {
+  maskCardSizeForSource,
+  resolveMaskSourceRatio,
+} from "../components/mask-helpers";
+import { cardSizeForRatio, NODE_DEFAULTS, newId } from "./use-node-ops";
 import type { ContextMenuState, Viewport } from "./use-canvas-gestures";
 import type {
   CanvasEdge,
@@ -182,13 +186,52 @@ const addConnection = useCallback(
           toNode.type === "video" ||
           toNode.type === "audio" ||
           toNode.type === "config");
-      if (srcText && canFillPrompt && !toNode.prompt.includes(srcText)) {
-        const nextPrompt = toNode.prompt.trim()
-          ? `${toNode.prompt.trim()}\n${srcText}`
-          : srcText;
-        const nextNodes = nodesRef.current.map((n) =>
-          n.id === toNode.id ? { ...n, prompt: nextPrompt } : n,
-        );
+      const maskRatio =
+        fromNode?.type === "image-mask" &&
+        toNode &&
+        (toNode.type === "image" || toNode.type === "config") &&
+        !toNode.mediaUrl
+          ? resolveMaskSourceRatio(fromNode, nodesRef.current, nextEdges)
+          : null;
+      const incomingMaskSize =
+        fromNode?.type === "image" &&
+        toNode?.type === "image-mask" &&
+        !toNode.mediaUrl &&
+        !toNode.freeResize
+          ? maskCardSizeForSource(fromNode)
+          : null;
+      if (
+        (srcText && canFillPrompt && !toNode.prompt.includes(srcText)) ||
+        maskRatio ||
+        incomingMaskSize
+      ) {
+        const nextNodes = nodesRef.current.map((n) => {
+          if (n.id !== toNode!.id) return n;
+          let updated = n;
+          if (srcText && canFillPrompt && !n.prompt.includes(srcText)) {
+            const nextPrompt = n.prompt.trim()
+              ? `${n.prompt.trim()}\n${srcText}`
+              : srcText;
+            updated = { ...updated, prompt: nextPrompt };
+          }
+          if (maskRatio) {
+            updated = { ...updated, genRatio: maskRatio };
+            if (updated.type === "image" && !updated.freeResize) {
+              const sized = cardSizeForRatio(maskRatio, "image");
+              if (sized) {
+                updated = { ...updated, width: sized.width, height: sized.height };
+              }
+            }
+          }
+          if (incomingMaskSize) {
+            updated = {
+              ...updated,
+              width: incomingMaskSize.width,
+              height: incomingMaskSize.height,
+            };
+          }
+          return updated;
+        });
         applyGraph(nextNodes, nextEdges);
       } else {
         applyEdges(nextEdges);
@@ -204,19 +247,34 @@ const createConnectedNode = useCallback(
     const pending = pendingConnectRef.current;
     if (!pending) return;
     const defaults = NODE_DEFAULTS[type];
+    const sourceNode = nodesRef.current.find(
+      (n) => n.id === pending.connection.nodeId,
+    );
+    const maskRatio =
+      sourceNode?.type === "image-mask" &&
+      (type === "image" || type === "config")
+        ? resolveMaskSourceRatio(sourceNode, nodesRef.current, edgesRef.current)
+        : null;
+    const sized =
+      maskRatio && type === "image"
+        ? cardSizeForRatio(maskRatio, "image")
+        : type === "image-mask" && sourceNode?.type === "image"
+          ? maskCardSizeForSource(sourceNode)
+          : null;
     const node = buildNode({
       type,
       title: defaults.title,
-      x: pending.worldX - defaults.w / 2,
-      y: pending.worldY - defaults.h / 2,
-      width: defaults.w,
-      height: defaults.h,
+      x: pending.worldX - (sized?.width ?? defaults.w) / 2,
+      y: pending.worldY - (sized?.height ?? defaults.h) / 2,
+      width: sized?.width ?? defaults.w,
+      height: sized?.height ?? defaults.h,
       content: "",
       prompt: "",
       status: "idle",
       hidden: false,
       groupId: null,
       color: null,
+      genRatio: maskRatio ?? undefined,
     });
     if (!node) {
       cancelPendingConnect();

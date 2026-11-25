@@ -14,7 +14,6 @@
 //   multi-selection toolbar (SelectionToolbar.tsx).
 import { useEffect, useState, type ReactNode } from "react";
 import {
-IconBrush,
 IconCamera,
 IconCopy,
 IconDownload,
@@ -69,7 +68,6 @@ export type ToolbarHandlers = {
   onCopyPrompt: (node: CanvasNode) => void;
   onReversePrompt: (node: CanvasNode) => void;
   onToggleFreeResize: (node: CanvasNode) => void;
-  onMaskEdit: (node: CanvasNode) => void;
   onCrop: (node: CanvasNode) => void;
   onSplit: (node: CanvasNode) => void;
   onUpscale: (node: CanvasNode) => void;
@@ -98,8 +96,6 @@ function imageToolIcon(id: ImageToolId, node: CanvasNode): ReactNode {
       return <IconUpload size={16} />;
     case "resize":
       return node.freeResize ? <IconLockOpen size={16} /> : <IconLock size={16} />;
-    case "maskEdit":
-      return <IconBrush size={16} />;
     case "crop":
       return <IconScissors size={16} />;
     case "split":
@@ -134,8 +130,6 @@ function imageToolRun(
       return () => h.onUpload(node);
     case "resize":
       return () => h.onToggleFreeResize(node);
-    case "maskEdit":
-      return () => h.onMaskEdit(node);
     case "crop":
       return () => h.onCrop(node);
     case "split":

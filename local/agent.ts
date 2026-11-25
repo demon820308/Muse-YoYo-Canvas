@@ -16,8 +16,9 @@ import type { Db } from "../server/src/actions/contracts";
 import { DATA_DIR } from "./config";
 import { readBlobBytes } from "./blobs";
 import { effectiveProfiles } from "./bridge-profiles";
+import { getAgyStatus, loadAgyConfig, runAgyPrompt, streamAgyChat } from "./agy";
 
-export type AgentProvider = "muse" | "openai" | "anthropic";
+export type AgentProvider = "muse" | "openai" | "anthropic" | "agy";
 
 export type AgentProfile = {
   id: string;
@@ -32,6 +33,8 @@ export type MaskedAgentProfile = Omit<AgentProfile, "apiKey"> & {
   apiKeyMasked: string;
   hasApiKey: boolean;
   builtin?: boolean;
+  ready?: boolean;
+  modelLabel?: string;
 };
 
 type StoredAgentConfig = {
@@ -126,6 +129,27 @@ const BUILTIN_MUSE_PROFILE: AgentProfile = {
   model: "muse-bridge",
 };
 
+const BUILTIN_AGY_PROFILE: AgentProfile = {
+  id: "agy-cli",
+  name: "AGY CLI (本地模型)",
+  provider: "agy",
+  baseUrl: "",
+  apiKey: "",
+  model: "gemini-3.8-flash-medium",
+};
+
+const AGENT_RESPONSE_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    reply: { type: "string" },
+    operations: {
+      type: "array",
+      items: { type: "object" },
+    },
+  },
+  required: ["reply", "operations"],
+};
+
 const CONFIG_PATH = resolve(DATA_DIR, "agent-config.json");
 
 function loadConfig(): StoredAgentConfig {
@@ -135,12 +159,18 @@ function loadConfig(): StoredAgentConfig {
       const profiles = Array.isArray(raw.profiles)
         ? raw.profiles.filter(
             (p): p is AgentProfile =>
-              Boolean(p && typeof p.id === "string" && p.id !== BUILTIN_MUSE_PROFILE.id),
+              Boolean(
+                p &&
+                  typeof p.id === "string" &&
+                  p.id !== BUILTIN_MUSE_PROFILE.id &&
+                  p.id !== BUILTIN_AGY_PROFILE.id,
+              ),
           )
         : [];
       const activeProfileId =
         typeof raw.activeProfileId === "string" &&
         (raw.activeProfileId === BUILTIN_MUSE_PROFILE.id ||
+          raw.activeProfileId === BUILTIN_AGY_PROFILE.id ||
           profiles.some((p) => p.id === raw.activeProfileId))
           ? raw.activeProfileId
           : BUILTIN_MUSE_PROFILE.id;
@@ -157,11 +187,15 @@ function saveConfig(cfg: StoredAgentConfig): void {
   writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf8");
 }
 
-function maskKey(key: string): string {
+export function maskKey(key: string): string {
   const trimmed = key.trim();
   if (!trimmed) return "";
-  if (trimmed.length <= 8) return "****";
-  return `${trimmed.slice(0, 4)}...${trimmed.slice(-4)}`;
+  if (trimmed.length <= 2) return "*".repeat(trimmed.length);
+  if (trimmed.length <= 8) {
+    return `${trimmed[0]}${"*".repeat(trimmed.length - 2)}${trimmed.slice(-1)}`;
+  }
+  const starCount = Math.min(12, trimmed.length - 8);
+  return `${trimmed.slice(0, 4)}${"*".repeat(starCount)}${trimmed.slice(-4)}`;
 }
 
 function toMasked(p: AgentProfile, builtin = false): MaskedAgentProfile {
@@ -177,8 +211,16 @@ function toMasked(p: AgentProfile, builtin = false): MaskedAgentProfile {
   };
 }
 
+function getBuiltinAgyProfile(): AgentProfile {
+  const agyCfg = loadAgyConfig();
+  return {
+    ...BUILTIN_AGY_PROFILE,
+    model: agyCfg.model || BUILTIN_AGY_PROFILE.model,
+  };
+}
+
 function getAllProfiles(cfg: StoredAgentConfig): AgentProfile[] {
-  return [BUILTIN_MUSE_PROFILE, ...cfg.profiles];
+  return [BUILTIN_MUSE_PROFILE, getBuiltinAgyProfile(), ...cfg.profiles];
 }
 
 function resolveOpenAiEndpoint(baseUrl: string): string {
@@ -198,6 +240,71 @@ function resolveAnthropicEndpoint(baseUrl: string): string {
   if (trimmed.endsWith("/messages")) return trimmed;
   if (trimmed.endsWith("/v1")) return `${trimmed}/messages`;
   return `${trimmed}/v1/messages`;
+}
+
+export function resolveModelsEndpoint(provider: "openai" | "anthropic", baseUrl: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, "");
+  if (!trimmed) throw new Error("请填写接口地址（Base URL）");
+  if (provider === "anthropic") {
+    const base = trimmed.replace(/\/messages$/, "");
+    return base.endsWith("/v1") ? `${base}/models` : `${base}/v1/models`;
+  }
+  const base = trimmed.replace(/\/chat\/completions$/, "");
+  const parsed = new URL(base);
+  if (parsed.pathname === "/" || parsed.pathname === "") {
+    return `${base}/v1/models`;
+  }
+  return `${base}/models`;
+}
+
+async function fetchAvailableModels(
+  provider: "openai" | "anthropic",
+  baseUrl: string,
+  apiKey: string,
+): Promise<string[]> {
+  const endpoint = resolveModelsEndpoint(provider, baseUrl);
+  const headers: Record<string, string> = {};
+  const key = apiKey.trim();
+  if (provider === "anthropic") {
+    headers["anthropic-version"] = "2023-06-01";
+    if (key) headers["x-api-key"] = key;
+  } else if (key) {
+    headers.authorization = `Bearer ${key}`;
+  }
+
+  const resp = await fetch(endpoint, {
+    method: "GET",
+    headers,
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`拉取模型失败 (${resp.status})：${text.slice(0, 200)}`);
+  }
+  const parsed = JSON.parse(text) as {
+    data?: Array<{ id?: unknown } | string>;
+    models?: Array<{ id?: unknown; name?: unknown } | string>;
+  };
+  const rawList = Array.isArray(parsed.data)
+    ? parsed.data
+    : Array.isArray(parsed.models)
+      ? parsed.models
+      : [];
+  const ids = rawList
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (item && typeof item === "object") {
+        const id = "id" in item ? item.id : "name" in item ? item.name : "";
+        return typeof id === "string" ? id.trim() : "";
+      }
+      return "";
+    })
+    .filter(Boolean);
+  const unique = Array.from(new Set(ids)).sort((a, b) => a.localeCompare(b));
+  if (unique.length === 0) {
+    throw new Error("接口未返回可用模型列表");
+  }
+  return unique;
 }
 
 export function buildAgentSystemPrompt(): string {
@@ -379,6 +486,31 @@ const ALLOWED_VISION_MIMES = new Set([
 ]);
 const MAX_VISION_BYTES = 4 * 1024 * 1024;
 
+function materializeAgyVisionImages(
+  refs?: { label?: string; mediaUrl?: string }[],
+): { dir: string; files: { label: string; path: string }[] } | null {
+  const images = loadVisionImages(refs);
+  if (images.length === 0) return null;
+  const dir = resolve(DATA_DIR, "tmp-agy-vision");
+  mkdirSync(dir, { recursive: true });
+  const files: { label: string; path: string }[] = [];
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i]!;
+    const ext =
+      img.mimeType === "image/png"
+        ? "png"
+        : img.mimeType === "image/webp"
+          ? "webp"
+          : img.mimeType === "image/gif"
+            ? "gif"
+            : "jpg";
+    const filePath = resolve(dir, `ref-${Date.now()}-${i}.${ext}`);
+    writeFileSync(filePath, Buffer.from(img.base64, "base64"));
+    files.push({ label: img.label, path: filePath });
+  }
+  return { dir, files };
+}
+
 function loadVisionImages(
   refs?: { label?: string; mediaUrl?: string }[],
 ): VisionImage[] {
@@ -504,8 +636,8 @@ async function streamVisionChat(
       };
 
   const signal = abortSignal
-    ? AbortSignal.any([abortSignal, AbortSignal.timeout(120_000)])
-    : AbortSignal.timeout(120_000);
+    ? AbortSignal.any([abortSignal, AbortSignal.timeout(300_000)])
+    : AbortSignal.timeout(300_000);
 
   const upstream = await fetch(endpoint, {
     method: "POST",
@@ -827,10 +959,19 @@ export async function handleAgent(
 
   if (req.method === "GET" && path === "/agent/config") {
     const cfg = loadConfig();
+    const agyStatus = await getAgyStatus(false);
+    const builtinAgy = getBuiltinAgyProfile();
+    const matchedModel = agyStatus.models.find((m) => m.id === builtinAgy.model);
+    const agyProfile: MaskedAgentProfile = {
+      ...toMasked(builtinAgy, true),
+      ready: agyStatus.ready,
+      modelLabel: matchedModel?.label ?? builtinAgy.model,
+    };
     return json({
       activeProfileId: cfg.activeProfileId,
       profiles: [
         toMasked(BUILTIN_MUSE_PROFILE, true),
+        agyProfile,
         ...cfg.profiles.map((p) => toMasked(p)),
       ],
     });
@@ -840,7 +981,15 @@ export async function handleAgent(
     const body = (await req.json().catch(() => null)) as { id?: string } | null;
     if (!body?.id) return json({ error: "缺少 id" }, 400);
     const cfg = loadConfig();
-    if (
+    if (body.id === BUILTIN_AGY_PROFILE.id) {
+      const agyStatus = await getAgyStatus(false);
+      if (!agyStatus.ready) {
+        return json(
+          { error: "AGY CLI 尚未部署、登录或启用，请先在顶部「AGY 引擎」完成配置" },
+          400,
+        );
+      }
+    } else if (
       body.id !== BUILTIN_MUSE_PROFILE.id &&
       !cfg.profiles.some((p) => p.id === body.id)
     ) {
@@ -874,10 +1023,10 @@ export async function handleAgent(
     const existing = body.id
       ? cfg.profiles.find((p) => p.id === body.id)
       : undefined;
+    const trimmedKey = body.apiKey?.trim() ?? "";
+    const isUnchangedMasked = existing && trimmedKey === maskKey(existing.apiKey);
     const nextApiKey =
-      body.apiKey && body.apiKey.trim()
-        ? body.apiKey.trim()
-        : (existing?.apiKey ?? "");
+      trimmedKey && !isUnchangedMasked ? trimmedKey : (existing?.apiKey ?? "");
     const saved: AgentProfile = {
       id: existing?.id ?? `custom-${randomUUID().slice(0, 8)}`,
       name: body.name.trim(),
@@ -904,8 +1053,12 @@ export async function handleAgent(
 
   if (req.method === "POST" && path === "/agent/config/delete") {
     const body = (await req.json().catch(() => null)) as { id?: string } | null;
-    if (!body?.id || body.id === BUILTIN_MUSE_PROFILE.id) {
-      return json({ error: "内置 Muse 配置不可删除" }, 400);
+    if (
+      !body?.id ||
+      body.id === BUILTIN_MUSE_PROFILE.id ||
+      body.id === BUILTIN_AGY_PROFILE.id
+    ) {
+      return json({ error: "内置模型配置不可删除" }, 400);
     }
     const cfg = loadConfig();
     cfg.profiles = cfg.profiles.filter((p) => p.id !== body.id);
@@ -914,6 +1067,39 @@ export async function handleAgent(
     }
     saveConfig(cfg);
     return json({ ok: true, activeProfileId: cfg.activeProfileId });
+  }
+
+  if (req.method === "POST" && path === "/agent/models") {
+    const body = (await req.json().catch(() => null)) as
+      | {
+          id?: string;
+          provider?: AgentProvider;
+          baseUrl?: string;
+          apiKey?: string;
+        }
+      | null;
+    const cfg = loadConfig();
+    const existing = body?.id
+      ? getAllProfiles(cfg).find((p) => p.id === body.id)
+      : undefined;
+    const provider = body?.provider ?? existing?.provider;
+    if (provider !== "openai" && provider !== "anthropic") {
+      return json({ ok: false, error: "仅支持 openai 或 anthropic 格式" }, 400);
+    }
+    const baseUrl = (body?.baseUrl ?? existing?.baseUrl ?? "").trim();
+    const trimmedKey = body?.apiKey?.trim() ?? "";
+    const isUnchangedMasked = existing && trimmedKey === maskKey(existing.apiKey);
+    const apiKey =
+      trimmedKey && !isUnchangedMasked ? trimmedKey : (existing?.apiKey ?? "");
+    try {
+      const models = await fetchAvailableModels(provider, baseUrl, apiKey);
+      return json({ ok: true, models });
+    } catch (err) {
+      return json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   if (req.method === "POST" && path === "/agent/test") {
@@ -951,14 +1137,38 @@ export async function handleAgent(
         });
       }
 
+      if (provider === "agy") {
+        const agyStatus = await getAgyStatus(false);
+        if (!agyStatus.ready) {
+          return json({
+            ok: false,
+            error: "AGY CLI 尚未部署、登录或启用，请先在顶部「AGY 引擎」完成配置",
+            latencyMs: Date.now() - startedAt,
+          });
+        }
+        const res = await runAgyPrompt({
+          prompt: "Reply with exactly: OK",
+          model: (body?.model ?? agyStatus.model).trim(),
+          timeoutMs: 30_000,
+        });
+        return json({
+          ok: true,
+          message: `连接成功（AGY 模型响应：${res.response.trim().slice(0, 40)}）`,
+          latencyMs: Date.now() - startedAt,
+        });
+      }
+
+      const trimmedTestKey = body?.apiKey?.trim() ?? "";
+      const isUnchangedTestMasked =
+        existing && trimmedTestKey === maskKey(existing.apiKey);
       const probeProfile: AgentProfile = {
         id: existing?.id ?? "test",
         name: existing?.name ?? "test",
         provider,
         baseUrl: (body?.baseUrl ?? existing?.baseUrl ?? "").trim(),
         apiKey:
-          body?.apiKey && body.apiKey.trim()
-            ? body.apiKey.trim()
+          trimmedTestKey && !isUnchangedTestMasked
+            ? trimmedTestKey
             : (existing?.apiKey ?? ""),
         model: (body?.model ?? existing?.model ?? "").trim(),
       };
@@ -1065,6 +1275,77 @@ export async function handleAgent(
       return json({ status: "pending", turnId, jobId: job.jobId });
     }
 
+    if (profile.provider === "agy") {
+      const agyStatus = await getAgyStatus(false);
+      if (!agyStatus.ready) {
+        return json(
+          { error: "AGY CLI 尚未部署、登录或启用，请先在顶部「AGY 引擎」完成配置" },
+          400,
+        );
+      }
+      const vision = materializeAgyVisionImages(body?.imageRefs);
+      const visionHint = vision
+        ? `\n\n【附带本地参考图（请使用工具读取查看）】\n${vision.files
+            .map((f) => `- ${f.label}: ${f.path}`)
+            .join("\n")}`
+        : "";
+      const historyText = messages
+        .slice(-12)
+        .map((m) => `${m.role === "user" ? "用户" : "助手"}：${m.content}`)
+        .join("\n\n");
+      const fullPrompt = [
+        `系统指令：\n${systemPrompt}`,
+        `对话记录：\n${historyText}${contextBlock}${visionHint}`,
+        `请严格按 JSON Schema 返回 {"reply": "...", "operations": [...]}。`,
+      ].join("\n\n");
+      const addDirs = vision ? [vision.dir] : [];
+      if (body?.stream) {
+        return streamAgyChat({
+          prompt: fullPrompt,
+          model: agyStatus.model,
+          addDirs,
+          jsonSchema: AGENT_RESPONSE_JSON_SCHEMA,
+          parseResponse: parseAgentJsonResponse,
+          abortSignal: req.signal,
+        });
+      }
+      try {
+        const res = await runAgyPrompt({
+          prompt: fullPrompt,
+          model: agyStatus.model,
+          addDirs,
+          jsonSchema: AGENT_RESPONSE_JSON_SCHEMA,
+          timeoutMs: 300_000,
+          signal: req.signal,
+        });
+        const structured = res.structuredOutput as
+          | { reply?: unknown; operations?: unknown }
+          | undefined;
+        if (
+          structured &&
+          typeof structured === "object" &&
+          typeof structured.reply === "string"
+        ) {
+          return json({
+            status: "done",
+            reply: structured.reply,
+            operations: Array.isArray(structured.operations) ? structured.operations : [],
+          });
+        }
+        const parsed = parseAgentJsonResponse(res.response);
+        return json({
+          status: "done",
+          reply: parsed.reply,
+          operations: parsed.operations,
+        });
+      } catch (err) {
+        return json(
+          { error: err instanceof Error ? err.message : String(err) },
+          502,
+        );
+      }
+    }
+
     try {
       const apiMessages = messages.slice(-16).map((m, idx, arr) =>
         idx === arr.length - 1 && m.role === "user" && contextBlock
@@ -1088,7 +1369,7 @@ export async function handleAgent(
               systemPrompt,
               apiMessages,
               16384,
-              90_000,
+              300_000,
               req.signal,
             )
           : await callAnthropicChat(
@@ -1096,7 +1377,7 @@ export async function handleAgent(
               systemPrompt,
               apiMessages,
               16384,
-              90_000,
+              300_000,
               false,
               req.signal,
             );
@@ -1107,8 +1388,16 @@ export async function handleAgent(
         operations: parsed.operations,
       });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isTimeout =
+        (err instanceof Error && err.name === "TimeoutError") ||
+        /timed out/i.test(msg);
       return json(
-        { error: err instanceof Error ? err.message : String(err) },
+        {
+          error: isTimeout
+            ? "模型响应超时（请检查网络/中转站状态，或换用响应更快的模型重试）"
+            : msg,
+        },
         502,
       );
     }
@@ -1313,6 +1602,31 @@ export async function handleAgent(
             .slice(-12)
             .map((m) => `${m.role === "user" ? "用户" : "助手"}：${m.content}`)
             .join("\n\n")}`;
+
+    if (profile.provider === "agy") {
+      const agyStatus = await getAgyStatus(false);
+      if (!agyStatus.ready) {
+        return json(
+          { error: "AGY CLI 尚未部署、登录或启用，请先在顶部「AGY 引擎」完成配置" },
+          400,
+        );
+      }
+      try {
+        const res = await runAgyPrompt({
+          prompt: `${extractSystem}\n\n${sourceContent}`,
+          model: agyStatus.model,
+          timeoutMs: 60_000,
+          signal: req.signal,
+        });
+        const draft = parseSkillDraftJson(res.response);
+        return json({ ok: true, draft });
+      } catch (err) {
+        return json(
+          { error: err instanceof Error ? err.message : String(err) },
+          502,
+        );
+      }
+    }
 
     try {
       const raw =

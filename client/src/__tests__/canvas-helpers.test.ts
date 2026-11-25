@@ -52,15 +52,17 @@ describe("gesture-math", () => {
 });
 
 describe("app-helpers", () => {
-  test("EXTENSION_ENTRIES 包含 6 类扩展工具入口", () => {
+  test("EXTENSION_ENTRIES 包含 7 类扩展工具入口", () => {
     expect(EXTENSION_ENTRIES.map((e) => e.type)).toEqual([
       "video-frames",
       "video-relay",
       "video-compose",
       "prompt-reverse",
       "audio-extract",
+      "image-mask",
       "sticky-note",
     ]);
+    expect(EXTENSION_ENTRIES.find((e) => e.type === "image-mask")?.label).toBe("绘制蒙版");
   });
 
   test("toNodeInput 与 toEdgeInput 仅保留保存契约字段", () => {

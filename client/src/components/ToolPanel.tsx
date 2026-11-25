@@ -87,6 +87,15 @@ const TOOL_HELP: Record<
     ],
     note: "需要画布里已配置支持看图的对话模型",
   },
+  "image-mask": {
+    title: "绘制蒙版",
+    steps: [
+      "把图片节点连到左边",
+      "点击卡片上的「绘制蒙版」，在弹窗内涂抹或框选要改的区域并保存",
+      "从右侧拖出或接入「图片」节点（换装/换脸可再连参考图），选择模式后生成",
+    ],
+    note: "只保存遮罩层本身，可随时点「编辑蒙版」无损修改笔画、颜色或反选",
+  },
 };
 
 /** The panel below a clicked tool node: the sheet's 说明 panel

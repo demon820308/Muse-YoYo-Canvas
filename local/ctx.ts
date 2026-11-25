@@ -30,6 +30,16 @@ import type { Db } from "../server/src/actions/contracts";
 import { createBlobClient } from "./blobs";
 import { DATA_DIR, PROJECTS_DIR } from "./config";
 import type { LocalDb } from "./db";
+import {
+  cancelAgyTask,
+  copyNodeEngine,
+  generateImageWithAgy,
+  getAgyStatus,
+  getNodeEngine,
+  registerAgyTask,
+  runAgyPrompt,
+  setNodeEngine,
+} from "./agy";
 
 const handlerByName = Handlers as unknown as Record<
   string,
@@ -212,6 +222,45 @@ export function createCtx(db: LocalDb): Ctx {
     tool: {
       async generate_media() {
         throw new BridgeQueuedError("generate_media");
+      },
+    },
+
+    localAgy: {
+      async isReady() {
+        return (await getAgyStatus(false)).ready;
+      },
+      getNodeEngine,
+      setNodeEngine,
+      copyNodeEngine,
+      startTask(runner) {
+        return registerAgyTask((signal) => runner({ signal }));
+      },
+      cancelTask: cancelAgyTask,
+      generateImage: generateImageWithAgy,
+      async completeText(opts) {
+        const prompt = opts.system
+          ? `系统要求：${opts.system}
+
+${opts.prompt}`
+          : opts.prompt;
+        const res = await runAgyPrompt({
+          prompt,
+          addDirs: opts.addDirs,
+          jsonSchema: {
+            type: "object",
+            properties: { text: { type: "string" } },
+            required: ["text"],
+          },
+          timeoutMs: opts.timeoutMs ?? 120_000,
+          signal: opts.signal,
+        });
+        const structured = res.structuredOutput as { text?: unknown } | null;
+        const text =
+          structured && typeof structured.text === "string" && structured.text.trim()
+            ? structured.text.trim()
+            : res.response.trim();
+        if (!text) throw new Error("AGY CLI 未返回有效文本内容");
+        return { text };
       },
     },
 

@@ -308,10 +308,35 @@ export type SpaceQueryInvalidationInput =
   | SpaceQueryInvalidation
   | SpaceQueryInvalidationBatch;
 
+export interface LocalAgyClient {
+  isReady(): Promise<boolean>;
+  getNodeEngine(nodeId: string, defaultEngine?: "muse" | "agy"): "muse" | "agy";
+  setNodeEngine(nodeId: string, engine: "muse" | "agy"): void;
+  copyNodeEngine(fromNodeId: string, toNodeId: string): void;
+  startTask(runner: (opts: { signal: AbortSignal }) => Promise<void>): string;
+  cancelTask(taskId: string): void;
+  generateImage(opts: {
+    prompt: string;
+    ratio: string | null;
+    refFilePaths: string[];
+    outputDir: string;
+    fileNameBase: string;
+    signal?: AbortSignal;
+  }): Promise<{ filePath: string }>;
+  completeText(opts: {
+    prompt: string;
+    system?: string;
+    addDirs?: string[];
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<{ text: string }>;
+}
+
 export interface Ctx extends PortableCtx {
   readonly agent: AgentClient;
   readonly inference: InferenceClient;
   readonly tool: SpaceToolClient;
+  readonly localAgy?: LocalAgyClient;
   emit(data: JsonValue): void;
   invalidateQueries(invalidation?: SpaceQueryInvalidationInput): void;
 }

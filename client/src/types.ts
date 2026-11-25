@@ -43,7 +43,8 @@ export type ToolNodeType =
   | "video-relay"
   | "audio-extract"
   | "video-compose"
-  | "prompt-reverse";
+  | "prompt-reverse"
+  | "image-mask";
 
 /** What each tool node needs connected into it, shown on the card/panel.
  * Wording follows the user's node spec sheets. */
@@ -53,6 +54,7 @@ export const TOOL_INPUT_HINT: Record<ToolNodeType, string> = {
   "audio-extract": "把视频节点连到左边再点提取",
   "video-compose": "左边接一个视频节点 + 一个音频节点，再点合成",
   "prompt-reverse": "把图片节点或六宫格连到左边",
+  "image-mask": "把图片节点连到左边，再点「绘制蒙版」",
 };
 
 /** The five prompt-reverse modes, in the node's spec order. */
@@ -194,6 +196,7 @@ export const SEQ_TYPE_LABEL: Record<NodeType, string> = {
   "audio-extract": "提取音频",
   "video-compose": "视频配乐",
   "prompt-reverse": "逆推提示词",
+  "image-mask": "绘制蒙版",
   "sticky-note": "便签",
 };
 
@@ -209,6 +212,7 @@ export const NODE_TYPE_LABEL: Record<NodeType, string> = {
   "audio-extract": "提取音频",
   "video-compose": "视频配乐",
   "prompt-reverse": "提示词逆推",
+  "image-mask": "绘制蒙版",
   "sticky-note": "便签",
 };
 

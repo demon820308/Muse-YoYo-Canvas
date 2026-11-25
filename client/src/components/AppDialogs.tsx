@@ -4,12 +4,13 @@ import type { NodeRunFeedback } from "./run-feedback";
 import { AngleDialog, type AngleParams } from "./AngleDialog";
 import { ConfigComposerDialog } from "./ConfigComposerDialog";
 import { CropDialog, type CropRect } from "./CropDialog";
-import { MaskDialog, type MaskPayload } from "./MaskDialog";
+import { MaskDialog, type MaskSavePayload } from "./MaskDialog";
+import { parseMaskNodeStateJson } from "./mask-helpers";
 import { MediaPreviewDialog, type PreviewTarget } from "./MediaPreviewDialog";
 import { NodeInfoModal } from "./NodeInfoModal";
 import { SplitDialog, type SplitParams } from "./SplitDialog";
 import { UpscaleDialog, type UpscaleParams } from "./UpscaleDialog";
-import type { CanvasNode, ReferenceInfo } from "../types";
+import type { CanvasEdge, CanvasNode, ReferenceInfo } from "../types";
 
 export type ProjectDialogState =
   | { mode: "create" }
@@ -122,7 +123,9 @@ export function AppDialogs(props: {
   onSplitConfirm: (node: CanvasNode, params: SplitParams) => void;
   onUpscaleConfirm: (node: CanvasNode, params: UpscaleParams) => void;
   onAngleConfirm: (node: CanvasNode, params: AngleParams) => void;
-  onMaskConfirm: (node: CanvasNode, payload: MaskPayload) => void;
+  onMaskConfirm: (node: CanvasNode, payload: MaskSavePayload) => void;
+  nodes?: CanvasNode[];
+  edges?: CanvasEdge[];
   toast: string | null;
 }) {
   const {
@@ -160,6 +163,8 @@ export function AppDialogs(props: {
     onUpscaleConfirm,
     onAngleConfirm,
     onMaskConfirm,
+    nodes = [],
+    edges = [],
     toast,
   } = props;
 
@@ -422,14 +427,30 @@ export function AppDialogs(props: {
           onConfirm={(params) => onAngleConfirm(editorDialog.node, params)}
         />
       ) : null}
-      {editorDialog?.kind === "mask" && editorDialog.node.mediaUrl ? (
-        <MaskDialog
-          src={editorDialog.node.mediaUrl}
-          title={editorDialog.node.title}
-          onClose={() => setEditorDialog(null)}
-          onConfirm={(payload) => onMaskConfirm(editorDialog.node, payload)}
-        />
-      ) : null}
+      {editorDialog?.kind === "mask" ? (() => {
+        const maskNode = editorDialog.node;
+        const nodeById = new Map(nodes.map((n) => [n.id, n]));
+        let sourceImgUrl: string | null = null;
+        for (const e of edges) {
+          if (e.toNodeId !== maskNode.id) continue;
+          const src = nodeById.get(e.fromNodeId);
+          if (src && src.type === "image" && src.mediaUrl) {
+            sourceImgUrl = src.mediaUrl;
+            break;
+          }
+        }
+        if (!sourceImgUrl) return null;
+        return (
+          <MaskDialog
+            src={sourceImgUrl}
+            title={maskNode.title}
+            initialStrokesUrl={maskNode.posterUrl}
+            initialStyle={parseMaskNodeStateJson(maskNode.prompt)}
+            onClose={() => setEditorDialog(null)}
+            onConfirm={(payload) => onMaskConfirm(maskNode, payload)}
+          />
+        );
+      })() : null}
 
       {toast ? (
         <div

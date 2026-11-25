@@ -21,7 +21,8 @@ export function isToolNodeType(type: NodeType): type is ToolNodeType {
     type === "video-relay" ||
     type === "audio-extract" ||
     type === "video-compose" ||
-    type === "prompt-reverse"
+    type === "prompt-reverse" ||
+    type === "image-mask"
   );
 }
 /** Replace @[node:id] chip tokens with a readable @引用 marker. */

@@ -14,6 +14,7 @@ import {
   AgentConfigModal,
   type MaskedAgentProfile,
 } from "./AgentConfigModal";
+import { formatAgyModelShortName, useAgyStatus } from "../hooks/use-agy";
 import { AgentOrbIcon } from "./AgentOrbIcon";
 import {
   AgentSkillsPanel,
@@ -240,6 +241,7 @@ export function AgentDrawer({
   showToast: (msg: string) => void;
   onBusyChange?: (busy: boolean) => void;
 }) {
+  const agy = useAgyStatus();
   const [profiles, setProfiles] = useState<MaskedAgentProfile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState("muse-bridge");
   const [configOpen, setConfigOpen] = useState(false);
@@ -493,13 +495,43 @@ export function AgentDrawer({
     });
   }, [messages, busy, confirmRegenMsgId]);
 
+  const profileDisplayName = useCallback(
+    (p: MaskedAgentProfile) => {
+      if (p.provider === "muse") return p.name;
+      if (p.provider === "agy") {
+        const ready = agy.status ? agy.ready : Boolean(p.ready);
+        if (!ready) return "AGY（未就绪）";
+        const modelId = agy.status?.model || p.model;
+        const shortName = formatAgyModelShortName(
+          modelId,
+          agy.status?.models,
+          p.modelLabel,
+        );
+        return `${shortName} · AGY`;
+      }
+      return p.model.trim() || p.name;
+    },
+    [agy.ready, agy.status],
+  );
+
   const switchProfile = async (id: string) => {
+    const prev = activeProfileId;
     setActiveProfileId(id);
-    await fetch("/agent/config/activate", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id }),
-    }).catch(() => {});
+    try {
+      const resp = await fetch("/agent/config/activate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (!resp.ok) {
+        setActiveProfileId(prev);
+        const err = (await resp.json().catch(() => ({}))) as { error?: string };
+        showToast(err.error ?? "切换模型失败");
+      }
+    } catch {
+      setActiveProfileId(prev);
+      showToast("切换模型失败");
+    }
   };
 
   const finishTurn = useCallback(
@@ -681,16 +713,19 @@ export function AgentDrawer({
     setBusy(true);
 
     const activeProfile = profiles.find((p) => p.id === activeProfileId);
+    const activeLabel = activeProfile
+      ? profileDisplayName(activeProfile)
+      : activeProfileId;
     turnMetaRef.current = {
       startedAt: Date.now(),
-      profileName: activeProfile?.name ?? activeProfileId,
+      profileName: activeLabel,
       provider: activeProfile?.provider ?? "unknown",
       promptPreview: formatMessageForDisplay(text).slice(0, 60),
     };
     setBusyHint(
       activeProfile?.provider === "muse"
         ? "已发送到 YoYo桥队列，等待云端 Muse 拉取…"
-        : `正在请求 ${activeProfile?.name ?? "模型"}…`,
+        : `正在请求 ${activeLabel}…`,
     );
 
     const controller = new AbortController();
@@ -1662,15 +1697,25 @@ export function AgentDrawer({
                   value={activeProfileId}
                   onChange={(e) => void switchProfile(e.target.value)}
                   disabled={busy}
-                  className="max-w-[130px] truncate rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2 py-0.5 text-[11px] text-[var(--dim)] outline-none hover:border-[var(--accent)] hover:text-[var(--text)] focus:border-[var(--accent)]"
+                  className="max-w-[210px] truncate rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2 py-0.5 text-[11px] text-[var(--dim)] outline-none hover:border-[var(--accent)] hover:text-[var(--text)] focus:border-[var(--accent)]"
                   aria-label="选择 Agent 模型"
-                  title="切换 Agent 模型"
+                  title={
+                    (() => {
+                      const cur = profiles.find((x) => x.id === activeProfileId);
+                      return cur ? `当前：${profileDisplayName(cur)}（${cur.name}）` : "切换 Agent 模型";
+                    })()
+                  }
                 >
-                  {profiles.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
+                  {profiles.map((p) => {
+                    const agyDisabled =
+                      p.provider === "agy" &&
+                      !(agy.status ? agy.ready : Boolean(p.ready));
+                    return (
+                      <option key={p.id} value={p.id} disabled={agyDisabled}>
+                        {profileDisplayName(p)}
+                      </option>
+                    );
+                  })}
                 </select>
                 <button
                   type="button"

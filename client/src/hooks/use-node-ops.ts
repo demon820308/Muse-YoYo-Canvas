@@ -70,8 +70,43 @@ export const NODE_DEFAULTS: Record<NodeType, { w: number; h: number; title: stri
   "audio-extract": { w: 260, h: 150, title: "提取音频" },
   "video-compose": { w: 280, h: 196, title: "视频配乐" },
   "prompt-reverse": { w: 280, h: 180, title: "提示词逆推" },
+  "image-mask": { w: 280, h: 240, title: "绘制蒙版" },
   "sticky-note": { w: 240, h: 200, title: "便签" },
 };
+
+const CARD_CHROME_W = 14;
+const CARD_CHROME_H = 33;
+
+export function cardSizeForRatio(
+  ratio: string | null | undefined,
+  kind: "image" | "video",
+): { width: number; height: number } | null {
+  if (!ratio) return null;
+  const m = /^(\d+(?:\.\d+)?)\s*[:xX/]\s*(\d+(?:\.\d+)?)$/.exec(ratio.trim());
+  if (!m) return null;
+  const rw = Number(m[1]);
+  const rh = Number(m[2]);
+  if (!Number.isFinite(rw) || !Number.isFinite(rh) || rw <= 0 || rh <= 0) {
+    return null;
+  }
+  const base = kind === "video" ? 420 : 320;
+  if (rw >= rh) {
+    return {
+      width: base,
+      height: Math.max(
+        120,
+        Math.round(CARD_CHROME_H + ((base - CARD_CHROME_W) * rh) / rw),
+      ),
+    };
+  }
+  return {
+    width: Math.max(
+      140,
+      Math.round(CARD_CHROME_W + ((base - CARD_CHROME_H) * rw) / rh),
+    ),
+    height: base,
+  };
+}
 
 export function useNodeOps({
   projectIdRef,
@@ -408,40 +443,6 @@ const insertAsset = useCallback(
   [addNodeAt, applyNodes, buildNode, flashNode, persistAddedNode, showToast, updateSelectedIds],
 );
 
-const CARD_CHROME_W = 14;
-const CARD_CHROME_H = 33;
-
-function cardSizeForRatio(
-  ratio: string | null | undefined,
-  kind: "image" | "video",
-): { width: number; height: number } | null {
-  if (!ratio) return null;
-  const m = /^(\d+(?:\.\d+)?)\s*[:xX/]\s*(\d+(?:\.\d+)?)$/.exec(ratio.trim());
-  if (!m) return null;
-  const rw = Number(m[1]);
-  const rh = Number(m[2]);
-  if (!Number.isFinite(rw) || !Number.isFinite(rh) || rw <= 0 || rh <= 0) {
-    return null;
-  }
-  const base = kind === "video" ? 420 : 320;
-  if (rw >= rh) {
-    return {
-      width: base,
-      height: Math.max(
-        120,
-        Math.round(CARD_CHROME_H + ((base - CARD_CHROME_W) * rh) / rw),
-      ),
-    };
-  }
-  return {
-    width: Math.max(
-      140,
-      Math.round(CARD_CHROME_W + ((base - CARD_CHROME_H) * rw) / rh),
-    ),
-    height: base,
-  };
-}
-
 const updateNode = useCallback(
   (id: string, patch: Partial<CanvasNode>) => {
     applyNodes(
@@ -589,6 +590,7 @@ const createGeneratorNode = useCallback(
     prompt: string,
     title: string,
     extraSources: CanvasNode[] = [],
+    ratio?: string,
   ): CanvasNode | null => {
     const pid = projectIdRef.current;
     if (!pid) return null;
@@ -605,7 +607,7 @@ const createGeneratorNode = useCallback(
       hidden: false,
       groupId: null,
       color: null,
-      genRatio: source.genRatio ?? "16:9",
+      genRatio: ratio ?? source.genRatio ?? "16:9",
     });
     if (!gen) return null;
     const sources = [source, ...extraSources];

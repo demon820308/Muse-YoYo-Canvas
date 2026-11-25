@@ -12,6 +12,7 @@ import {
   IconX,
 } from "../icons";
 import type { BridgeSummary } from "./BridgeSetupModal";
+import type { AgyStatus } from "../hooks/use-agy";
 import type { ProjectDialogState } from "./AppDialogs";
 import { ProjectMenuItem } from "./ProjectChrome";
 
@@ -49,6 +50,8 @@ export function TopProjectBar(props: {
   bridgeSummary: BridgeSummary | null;
   bridgeSummaryTimeout: boolean;
   onOpenBridgeModal: () => void;
+  agyStatus: AgyStatus | null;
+  onOpenAgyModal: () => void;
   importReport: ImportReport | null;
   dismissImportReport: () => void;
 }) {
@@ -72,6 +75,8 @@ export function TopProjectBar(props: {
     bridgeSummary,
     bridgeSummaryTimeout,
     onOpenBridgeModal,
+    agyStatus,
+    onOpenAgyModal,
     importReport,
     dismissImportReport,
   } = props;
@@ -244,6 +249,41 @@ export function TopProjectBar(props: {
           </div>
         </div>
         <span className="flex-1" />
+        {(() => {
+          const agyReady = Boolean(agyStatus?.ready);
+          const agyInstalled = Boolean(agyStatus?.installed);
+          const agyLabel = agyReady
+            ? "AGY 已就绪"
+            : agyInstalled
+              ? agyStatus?.loggedIn
+                ? "AGY 待启用"
+                : "AGY 待登录"
+              : "AGY 引擎";
+          return (
+            <button
+              type="button"
+              onClick={onOpenAgyModal}
+              className="hit-40 pointer-events-auto mr-1.5 flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 text-[12px] font-medium text-[var(--text)] shadow-sm transition-colors hover:bg-[var(--hover)]"
+              aria-label={agyLabel}
+              title={
+                agyReady
+                  ? `AGY 本地引擎已就绪（模型：${agyStatus?.model}），可切换 Nano Banana 生图与本地推理`
+                  : "一键部署并登录本地 agy CLI，解锁 Nano Banana 生图与本地模型"
+              }
+            >
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  agyReady
+                    ? "bg-[var(--teal)]"
+                    : agyInstalled
+                      ? "bg-[var(--accent)]"
+                      : "bg-[var(--dim)]"
+                }`}
+              />
+              <span>{agyLabel}</span>
+            </button>
+          );
+        })()}
         {(() => {
           const isLoading = bridgeSummary === null && !bridgeSummaryTimeout;
           const bState = bridgeSummary?.state ?? null;

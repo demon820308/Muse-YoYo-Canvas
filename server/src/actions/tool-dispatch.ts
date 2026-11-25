@@ -4,6 +4,8 @@
 
 import { z, type Ctx } from "@hatch/space-sdk";
 import { Contracts } from "@space/privileged";
+import { eq } from "drizzle-orm";
+import * as schema from "../schema";
 import { type Db, type NodeRow, type ProjectRow } from "./contracts";
 import { buildGenerationContext, collectInputs } from "./generation-context";
 import { getNodeRow, getProjectRow, attachResultNode, recordMediaAsset, markFailed } from "./graph-helpers";
@@ -243,6 +245,7 @@ export type ToolRunOptions = {
   lastOffsetSec?: number;
   loopAudio?: boolean;
   reverseMode?: "concise" | "chinese" | "detailed" | "english" | "grid";
+  engine?: "muse" | "agy";
 };
 
 /** 视频抽帧 / 提取音频分支（共用连入视频的定位与校验，再按节点类型分流）。批次 S2 从 runToolDispatch 整段提取，分支逻辑逐字不变。*/
@@ -515,6 +518,75 @@ async function runPromptReverseTool(
     },
   } as const;
   const modeSpec = REVERSE_MODES[reverseMode];
+  const engine = options.engine ?? ctx.localAgy?.getNodeEngine(node.id) ?? "muse";
+  if (engine === "agy") {
+    if (!ctx.localAgy || !(await ctx.localAgy.isReady())) {
+      return toolFail(
+        db,
+        node.id,
+        "AGY CLI 尚未部署、登录或启用，请先在顶部「AGY 引擎」完成配置",
+      );
+    }
+    const imageTitle = image.title || "图片";
+    const resultTitle = `${imageTitle} · ${modeSpec.label}`;
+    let taskId = "";
+    taskId = ctx.localAgy.startTask(async ({ signal }) => {
+      try {
+        const res = await ctx.localAgy!.completeText({
+          prompt: [
+            `请读取本地图片文件：${sendSourcePath}`,
+            `仔细观察图片内容，按下面的要求只输出纯文本结果（不要包含文件路径、Markdown 链接或额外解释说明）：`,
+            modeSpec.instruction,
+          ].join("\n\n"),
+          system: "你是一位图片分析师，擅长把图片逆推成生图提示词与详细画面描述",
+          addDirs: [outDir],
+          timeoutMs: INFERENCE_TIMEOUT_SECS * 1000,
+          signal,
+        });
+        if (signal.aborted) return;
+        const current = await getNodeRow(db, node.id);
+        if (
+          !current ||
+          (current.genStatus !== "working" && current.genStatus !== "queued") ||
+          current.genTaskId !== taskId
+        ) {
+          return;
+        }
+        await attachResultNode(db, current, {
+          type: "text",
+          mediaBlobKey: null,
+          mimeType: null,
+          filePath: null,
+          title: resultTitle,
+          content: res.text,
+          prompt: res.text,
+        });
+      } catch (err) {
+        if (signal.aborted) return;
+        const current = await getNodeRow(db, node.id);
+        if (
+          !current ||
+          (current.genStatus !== "working" && current.genStatus !== "queued") ||
+          current.genTaskId !== taskId
+        ) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        await markFailed(db, node.id, message);
+      }
+    });
+    await db
+      .update(schema.canvasNodes)
+      .set({
+        genStatus: "working",
+        genTaskId: taskId,
+        genError: null,
+        status: "loading",
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.canvasNodes.id, node.id));
+    return { status: "working", error: null };
+  }
   let result: { text: string };
   try {
     result = await ctx.inference.complete(

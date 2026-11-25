@@ -23,7 +23,9 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fileToBase64 } from "@hatch/space-sdk/client";
 import { api, type ApiRequest } from "../api";
+import { buildInputsByNodeId } from "../canvas-derived";
 import { frameMatchesGenSizeAspect } from "../canvas-geometry";
+import { readNodeMaskMode } from "../components/mask-helpers";
 import { type NodeRunFeedback } from "../components/run-feedback";
 import {
   VIDEO_SECONDS_DEFAULT,
@@ -31,6 +33,7 @@ import {
   type CanvasNode,
 } from "../types";
 import { NODE_DEFAULTS } from "./use-node-ops";
+import { useAgyStatus } from "./use-agy";
 
 type Viewport = { x: number; y: number; zoom: number };
 
@@ -52,6 +55,7 @@ export function useGeneration({
   flushSave,
   showToast,
   updateSelectedIds,
+  onOpenMaskEditor,
 }: {
   projectId: string | null;
   projectIdRef: { current: string | null };
@@ -70,8 +74,10 @@ export function useGeneration({
   flushSave: () => Promise<void>;
   showToast: (message: string) => void;
   updateSelectedIds: (next: Set<string>) => void;
+  onOpenMaskEditor?: (node: CanvasNode) => void;
 }) {
 const queryClient = useQueryClient();
+const agy = useAgyStatus();
 const [genBusyId, setGenBusyId] = useState<string | null>(null);
 // Node whose generation request is in flight from THIS page (the
 // server's genStatus only becomes visible after the action call
@@ -260,9 +266,26 @@ const runGeneration = useCallback(
     setDirectGenId(node.id);
     try {
       await flushSave();
+      const engine = agy.effectiveEngineFor(
+        node.id,
+        node.type === "image" ? "agy" : "muse",
+      );
+      const nodeInputs =
+        buildInputsByNodeId(nodesRef.current, edgesRef.current).get(node.id) ?? [];
+      const hasMaskInput = nodeInputs.some((n) => n.type === "image-mask");
+      const isImageGen =
+        node.type === "image" ||
+        (node.type === "config" && (node.genMode ?? "image") === "image");
+      const maskMode =
+        hasMaskInput && isImageGen ? readNodeMaskMode(node.id) : undefined;
       const res =
         node.type === "config"
-          ? await api.runConfigNode({ projectId: pid, nodeId: node.id })
+          ? await api.runConfigNode({
+              projectId: pid,
+              nodeId: node.id,
+              engine,
+              maskMode,
+            })
           : node.type === "video"
             ? await api.generateVideo({
                 projectId: pid,
@@ -271,7 +294,12 @@ const runGeneration = useCallback(
               })
             : node.type === "audio"
               ? await api.generateAudio({ projectId: pid, nodeId: node.id })
-              : await api.generateImage({ projectId: pid, nodeId: node.id });
+              : await api.generateImage({
+                  projectId: pid,
+                  nodeId: node.id,
+                  engine,
+                  maskMode,
+                });
       if (res.status === "done") {
         showToast("生成完成");
         settleRunFeedback(node.id, "done");
@@ -303,10 +331,11 @@ const runGeneration = useCallback(
       }
       setGenBusyId(null);
       setDirectGenId(null);
+      void queryClient.invalidateQueries({ queryKey: ["agy-status"] });
       void refreshGraphFromServer();
     }
   },
-  [beginRunFeedback, flushSave, queryClient, refreshGraphFromServer, settleRunFeedback, showToast],
+  [agy, beginRunFeedback, flushSave, queryClient, refreshGraphFromServer, settleRunFeedback, showToast],
 );
 
 const runTool = useCallback(
@@ -316,6 +345,19 @@ const runTool = useCallback(
   ) => {
     const pid = projectIdRef.current;
     if (!pid) return;
+    if (node.type === "image-mask") {
+      const nodeInputs =
+        buildInputsByNodeId(nodesRef.current, edgesRef.current).get(node.id) ?? [];
+      const imageInput = nodeInputs.find(
+        (n) => n.type === "image" && Boolean(n.mediaUrl),
+      );
+      if (!imageInput) {
+        showToast("请先从图片节点右侧拖线连入本蒙版节点");
+        return;
+      }
+      onOpenMaskEditor?.(node);
+      return;
+    }
     // Anti-double-submit, same guard as runGeneration.
     if (inFlightRunsRef.current.has(node.id)) return;
     inFlightRunsRef.current.add(node.id);

@@ -253,6 +253,7 @@ const TOOL_CREATE_TYPES: ToolNodeType[] = [
   "audio-extract",
   "video-compose",
   "prompt-reverse",
+  "image-mask",
 ];
 
 export function NodeCreateMenu({

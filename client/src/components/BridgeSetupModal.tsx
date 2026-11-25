@@ -132,6 +132,14 @@ export function BridgeSetupModal({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [newProfileLabel, setNewProfileLabel] = useState("");
+  const [quickAddOpen, setQuickAddOpen] = useState(false);
+  const [createdProfile, setCreatedProfile] = useState<{
+    id: string;
+    label: string;
+    plainToken: string;
+  } | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   const fetchState = useCallback(async () => {
     try {
@@ -167,6 +175,9 @@ export function BridgeSetupModal({
     if (!open) {
       setTabInitialized(false);
       setFormInitialized(false);
+      setQuickAddOpen(false);
+      setCreatedProfile(null);
+      setRenamingId(null);
       return;
     }
     setLoading(true);
@@ -336,10 +347,27 @@ export function BridgeSetupModal({
       const json = (await res.json()) as {
         error?: string;
         plainToken?: string;
+        profile?: { id: string; label: string };
       };
       if (!res.ok) throw new Error(json.error ?? "操作失败");
-      if (json.plainToken) setSessionToken(json.plainToken);
-      if (action === "add") setNewProfileLabel("");
+      if (action === "add" && json.plainToken && json.profile) {
+        setCreatedProfile({
+          id: json.profile.id,
+          label: json.profile.label,
+          plainToken: json.plainToken,
+        });
+        setNewProfileLabel("");
+        setQuickAddOpen(false);
+        showToast("已生成新账号，请复制令牌去 Muse 配对");
+      } else if (action === "activate") {
+        showToast("已切换当前账号");
+      } else if (action === "rename") {
+        setRenamingId(null);
+        setRenameValue("");
+        showToast("已更新账号备注名");
+      } else if (action === "delete" && createdProfile?.id === payload.id) {
+        setCreatedProfile(null);
+      }
       await fetchState();
       onSummaryChange();
     } catch (err) {
@@ -370,7 +398,7 @@ export function BridgeSetupModal({
     >
       {/* 顶部状态总览 + Tab */}
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] pb-3">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span
             className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
               diag?.state === "connected"
@@ -391,7 +419,43 @@ export function BridgeSetupModal({
             />
             {diag?.label ?? "检测中…"}
           </span>
-          {activeProfile ? (
+          {data && !data.envDriven ? (
+            <>
+              {data.profiles.length > 0 ? (
+                <select
+                  aria-label="切换当前桥账号"
+                  value={data.activeProfileId ?? ""}
+                  disabled={busyAction !== null}
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      void handleProfileAction("activate", { id: e.target.value });
+                    }
+                  }}
+                  className="h-7 max-w-[160px] rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-2 text-xs font-medium text-[var(--text)] outline-none focus:border-[var(--accent)] disabled:opacity-50"
+                >
+                  {!data.activeProfileId ? (
+                    <option value="" disabled>
+                      选择当前账号…
+                    </option>
+                  ) : null}
+                  {data.profiles.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                      {p.everConnectedAt ? "" : "（未配对）"}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => setQuickAddOpen((v) => !v)}
+                className="h-7 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-2 text-xs font-medium text-[var(--accent)] hover:bg-[var(--hover)] disabled:opacity-50"
+              >
+                {quickAddOpen ? "收起新建" : "+ 新建账号"}
+              </button>
+            </>
+          ) : activeProfile ? (
             <span className="text-xs text-[var(--dim)]">
               当前账号：{activeProfile.label}
             </span>
@@ -425,6 +489,114 @@ export function BridgeSetupModal({
       {errorMsg ? (
         <div className="mb-3 rounded-lg border border-[var(--danger)]/35 bg-[var(--danger-soft)] px-3 py-2 text-xs text-[var(--danger)]">
           {errorMsg}
+        </div>
+      ) : null}
+
+      {quickAddOpen && data && !data.envDriven ? (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void handleProfileAction("add", { label: newProfileLabel });
+          }}
+          className="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-2.5 text-xs"
+        >
+          <input
+            type="text"
+            value={newProfileLabel}
+            onChange={(e) => setNewProfileLabel(e.target.value)}
+            placeholder="新账号备注名（可留空，如：备用账号）"
+            autoFocus
+            disabled={busyAction !== null}
+            className="h-8 min-w-[180px] flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 text-xs outline-none focus:border-[var(--accent)]"
+          />
+          <button
+            type="submit"
+            disabled={busyAction !== null}
+            className="h-8 rounded-lg bg-[var(--accent)] px-3 font-medium text-[var(--accent-ink)] disabled:opacity-50"
+          >
+            {busyAction === "add" ? "生成中…" : "生成新账号"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setQuickAddOpen(false)}
+            className="h-8 rounded-lg border border-[var(--border)] px-2.5 text-[var(--dim)] hover:bg-[var(--hover)]"
+          >
+            取消
+          </button>
+        </form>
+      ) : null}
+
+      {createdProfile && data ? (
+        <div className="mb-3 space-y-2 rounded-xl border border-[var(--accent)]/40 bg-[var(--accent-soft)] p-3 text-xs">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-semibold text-[var(--text)]">
+              新账号「{createdProfile.label}」已生成（明文令牌仅显示这一次）
+            </span>
+            <button
+              type="button"
+              onClick={() => setCreatedProfile(null)}
+              className="rounded px-1.5 py-0.5 text-[var(--dim)] hover:bg-[var(--hover)]"
+              aria-label="关闭新账号令牌提示"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5">
+              <div className="min-w-0">
+                <div className="text-[11px] text-[var(--dim)]">隧道地址</div>
+                <div className="truncate font-mono">https://{data.hostname}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  void copyText(`https://${data.hostname}`, "已复制隧道地址")
+                }
+                className="shrink-0 rounded border border-[var(--border)] px-2 py-1 hover:bg-[var(--hover)]"
+              >
+                复制地址
+              </button>
+            </div>
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5">
+              <div className="min-w-0">
+                <div className="text-[11px] text-[var(--dim)]">桥令牌</div>
+                <div className="truncate font-mono">
+                  {createdProfile.plainToken.slice(0, 6)}••••
+                  {createdProfile.plainToken.slice(-4)}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  void copyText(createdProfile.plainToken, "已复制桥令牌")
+                }
+                className="shrink-0 rounded bg-[var(--accent)] px-2 py-1 font-medium text-[var(--accent-ink)]"
+              >
+                复制令牌
+              </button>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--dim)]">
+            <span>
+              打开该 Muse 账号的「YoYo桥」设置页粘贴以上两项并保存；切回/设为当前后即接管新任务。
+            </span>
+            {data.activeProfileId === createdProfile.id ? (
+              <span className="rounded bg-[var(--teal-soft)] px-2 py-0.5 font-medium text-[var(--teal)]">
+                已设为当前账号
+              </span>
+            ) : (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() =>
+                  void handleProfileAction("activate", { id: createdProfile.id })
+                }
+                className="shrink-0 rounded-md border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 font-medium text-[var(--text)] hover:bg-[var(--hover)]"
+              >
+                设为当前账号
+              </button>
+            )}
+          </div>
         </div>
       ) : null}
 
@@ -774,29 +946,66 @@ export function BridgeSetupModal({
           <div className="space-y-2">
             {data.profiles.map((p) => {
               const isActive = p.id === data.activeProfileId;
+              const isRenaming = renamingId === p.id;
               return (
                 <div
                   key={p.id}
                   className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2"
                 >
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{p.label}</span>
-                      {isActive ? (
-                        <span className="rounded bg-[var(--teal-soft)] px-1.5 py-0.5 text-[10px] text-[var(--teal)]">
-                          当前启用
-                        </span>
-                      ) : null}
-                    </div>
+                  <div className="min-w-0 flex-1">
+                    {isRenaming ? (
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void handleProfileAction("rename", {
+                            id: p.id,
+                            label: renameValue,
+                          });
+                        }}
+                        className="flex items-center gap-1.5"
+                      >
+                        <input
+                          type="text"
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          autoFocus
+                          className="h-7 w-40 rounded border border-[var(--border)] bg-[var(--surface)] px-2 text-xs outline-none focus:border-[var(--accent)]"
+                        />
+                        <button
+                          type="submit"
+                          disabled={busyAction !== null}
+                          className="rounded bg-[var(--accent)] px-2 py-1 text-[11px] font-medium text-[var(--accent-ink)]"
+                        >
+                          保存
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRenamingId(null)}
+                          className="rounded border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--dim)]"
+                        >
+                          取消
+                        </button>
+                      </form>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{p.label}</span>
+                        {isActive ? (
+                          <span className="rounded bg-[var(--teal-soft)] px-1.5 py-0.5 text-[10px] text-[var(--teal)]">
+                            当前启用
+                          </span>
+                        ) : null}
+                      </div>
+                    )}
                     <div className="mt-0.5 font-mono text-[11px] text-[var(--dim)]">
                       {p.maskedToken} · 最近在线：{fmtTime(p.lastSeenAt)}
                     </div>
                   </div>
-                  {!data.envDriven ? (
+                  {!data.envDriven && !isRenaming ? (
                     <div className="flex gap-1.5">
                       {!isActive ? (
                         <button
                           type="button"
+                          disabled={busyAction !== null}
                           onClick={() =>
                             void handleProfileAction("activate", { id: p.id })
                           }
@@ -807,8 +1016,26 @@ export function BridgeSetupModal({
                       ) : null}
                       <button
                         type="button"
+                        disabled={busyAction !== null}
                         onClick={() => {
-                          if (window.confirm(`确认删除账号「${p.label}」？`)) {
+                          setRenamingId(p.id);
+                          setRenameValue(p.label);
+                        }}
+                        className="rounded border border-[var(--border)] px-2 py-1 text-[var(--dim)] hover:bg-[var(--hover)]"
+                      >
+                        改名
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busyAction !== null}
+                        onClick={() => {
+                          const claimedWarn =
+                            data.counts.claimed > 0
+                              ? `\n\n注意：当前有 ${data.counts.claimed} 个任务在途，若为该账号领走，删除后结果将无法回传。`
+                              : "";
+                          if (
+                            window.confirm(`确认删除账号「${p.label}」？${claimedWarn}`)
+                          ) {
                             void handleProfileAction("delete", { id: p.id });
                           }
                         }}

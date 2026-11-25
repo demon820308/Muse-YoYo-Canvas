@@ -40,6 +40,7 @@ function blockColor(node: CanvasNode): string {
     case "audio-extract":
     case "video-compose":
     case "prompt-reverse":
+    case "image-mask":
       return "#4fc4c9";
     default:
       return "var(--dim)";

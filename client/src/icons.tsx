@@ -321,6 +321,7 @@ export const NODE_TYPE_ICON: Record<
   "audio-extract": IconAudioExtract,
   "video-compose": IconCompose,
   "prompt-reverse": IconReverse,
+  "image-mask": (p) => <IconBrush {...p} />,
   "sticky-note": IconStickyNote,
 };
 

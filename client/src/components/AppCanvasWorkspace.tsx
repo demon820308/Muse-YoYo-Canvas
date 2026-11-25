@@ -311,6 +311,7 @@ export function AppCanvasWorkspace(p: AppCanvasWorkspaceProps) {
             selectedNode={view.selectedNode}
             selectedReferences={view.selectedReferences}
             nodes={p.nodes}
+            inputsByNodeId={view.inputsByNodeId}
             genBusyId={p.genBusyId}
             runFeedback={p.runFeedback}
             updateNode={p.onUpdateNode}

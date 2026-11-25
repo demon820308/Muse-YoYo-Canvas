@@ -3,20 +3,29 @@
 // 当前档案门控的鉴权解析、环境变量临时单档案、令牌掩码、上限。
 // 数据根指向临时目录，与真实 ./data 隔离。
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { atomicWriteFileSync } from "../atomic-write";
 
+const prevRoot = process.env.YOYO_LOCAL_ROOT;
 const root = mkdtempSync(resolve(tmpdir(), "yoyo-bridge-profiles-"));
 process.env.YOYO_LOCAL_ROOT = root;
 delete process.env.YOYO_BRIDGE_TOKEN;
 
-const { DATA_DIR } = await import("../config");
 const profiles = await import("../bridge-profiles");
 
-const BRIDGE_FILE = resolve(DATA_DIR, "bridge.json");
+const BRIDGE_FILE = resolve(root, "bridge.json");
+
+beforeEach(() => {
+  process.env.YOYO_LOCAL_ROOT = root;
+});
+
+afterAll(() => {
+  if (prevRoot === undefined) delete process.env.YOYO_LOCAL_ROOT;
+  else process.env.YOYO_LOCAL_ROOT = prevRoot;
+});
 
 function resetFile(content?: unknown): void {
   if (content === undefined) {

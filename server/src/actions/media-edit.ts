@@ -260,16 +260,26 @@ export const MediaEditActions = {
       fileName: z.string().max(300),
       mimeType: z.string().max(120),
       dataBase64: z.string().max(14_000_000),
+      strokesBase64: z.string().max(14_000_000).optional(),
+      maskStateJson: z.string().max(4_000).optional(),
     }),
     response: z.object({ node: nodeShape, filePath: z.string().nullable() }),
     privileged: [Contracts.writeProjectFile, Contracts.probeMediaFile, Contracts.makePoster, Contracts.makePlaybackProxy, Contracts.readMediaFile],
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       const node = await getNodeRow(db, args.nodeId);
-      if (!node || (node.type !== "image" && node.type !== "video" && node.type !== "audio")) {
+      if (
+        !node ||
+        (node.type !== "image" &&
+          node.type !== "image-mask" &&
+          node.type !== "video" &&
+          node.type !== "audio")
+      ) {
         throw new Error("replaceNodeMedia: node not found or not a media node");
       }
-      if (!args.mimeType.startsWith(`${node.type}/`)) {
+      const expectedMimePrefix =
+        node.type === "image-mask" ? "image/" : `${node.type}/`;
+      if (!args.mimeType.startsWith(expectedMimePrefix)) {
         throw new Error(`replaceNodeMedia: mimeType ${args.mimeType} does not match node type ${node.type}`);
       }
       const project = await getProjectRow(db, node.projectId);
@@ -303,11 +313,23 @@ export const MediaEditActions = {
           genSize = null;
         }
       }
+      let posterBlobKey: string | null = null;
+      if (node.type === "image-mask" && args.strokesBase64) {
+        posterBlobKey = `media/${node.projectId}/${node.id}/mask-strokes`;
+        await ctx.blobs.put(
+          posterBlobKey,
+          Buffer.from(args.strokesBase64, "base64"),
+          { contentType: "image/png" },
+        );
+      }
       await db
         .update(schema.canvasNodes)
         .set({
           title: args.fileName || node.title,
           content: "",
+          ...(node.type === "image-mask" && args.maskStateJson !== undefined
+            ? { prompt: args.maskStateJson }
+            : {}),
           status: "success",
           genStatus: "idle",
           genError: null,
@@ -315,7 +337,7 @@ export const MediaEditActions = {
           mediaBlobKey: blobKey,
           mimeType: args.mimeType,
           filePath,
-          posterBlobKey: null,
+          posterBlobKey,
           // The old file's playback proxy is stale the moment the
           // media is replaced; cleared so a fresh one is produced.
           proxyBlobKey: null,

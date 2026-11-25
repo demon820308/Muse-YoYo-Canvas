@@ -18,6 +18,7 @@ import {
   type GenMode,
 } from "../types";
 import { IconCheck, IconPlay } from "../icons";
+import { useAgyStatus, type AgyEngine } from "../hooks/use-agy";
 
 /** 生成配置 node body, structured after the user's spec sheet: mode
  * tabs on top, live reference-count chips (counted from the node's
@@ -48,7 +49,10 @@ export function ConfigNodeBody({
   onStopNode: (node: CanvasNode) => void;
   onOpenComposer: (node: CanvasNode) => void;
 }) {
+  const agy = useAgyStatus();
   const mode: GenMode = node.genMode ?? "image";
+  const supportsAgy = mode === "image" || mode === "text";
+  const engine: AgyEngine = supportsAgy ? agy.effectiveEngineFor(node.id) : "muse";
   const textCount = inputs.filter((n) => n.type === "text").length;
   const imageCount = inputs.filter((n) => n.type === "image").length;
   const videoCount = inputs.filter((n) => n.type === "video").length;
@@ -123,15 +127,38 @@ export function ConfigNodeBody({
          * row below it carries ONLY the parameters the platform
          * channel really honors （生图比例/尺寸、视频比例/时长） —
          * audio and text have none to offer. */}
-        <select
-          value="platform"
-          onChange={() => undefined}
-          onPointerDown={(e) => e.stopPropagation()}
-          className="w-auto shrink-0 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[11px] text-[var(--text)]"
-          aria-label="生成模型（本画布只有平台通道一个选项）"
-        >
-          <option value="platform">平台通道 · 自动</option>
-        </select>
+        {supportsAgy ? (
+          <select
+            value={engine}
+            onChange={(e) => {
+              const next = e.target.value as AgyEngine;
+              void agy.setNodeEngine(node.id, next);
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="w-auto max-w-[165px] shrink-0 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[11px] text-[var(--text)]"
+            aria-label="选择生成通道"
+          >
+            <option value="muse">Muse 桥（默认）</option>
+            <option value="agy" disabled={!agy.ready}>
+              {mode === "image"
+                ? "Nano Banana · AGY"
+                : agy.ready
+                  ? `${agy.shortModelName} · AGY`
+                  : "AGY"}
+              {!agy.ready ? "（需部署并登录）" : ""}
+            </option>
+          </select>
+        ) : (
+          <select
+            value="platform"
+            onChange={() => undefined}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="w-auto shrink-0 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[11px] text-[var(--text)]"
+            aria-label="生成模型（当前模式仅支持平台通道）"
+          >
+            <option value="platform">Muse 桥 · 自动</option>
+          </select>
+        )}
         {mode === "audio" || mode === "text" ? (
           <span className="shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-[11px] text-[var(--dim)]">
             {summary}

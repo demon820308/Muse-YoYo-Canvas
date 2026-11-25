@@ -163,6 +163,18 @@
   input[type="range"] {
     accent-color: var(--accent);
   }
+
+  /* Floating UI panels inside [data-canvas-root] must not inherit the canvas grab cursor. */
+  [data-ui] {
+    cursor: default;
+  }
+
+  /* Text inputs (including contentEditable surfaces and inputs inside grab-cursor cards) show the text cursor. */
+  input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"], [type="button"], [type="submit"], [type="reset"], [type="image"]),
+  textarea,
+  [contenteditable]:not([contenteditable="false"]) {
+    cursor: text;
+  }
 }
 
 /* Floating capsule chrome shared by the canvas shell. */

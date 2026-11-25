@@ -7,7 +7,8 @@ import type { EditorDialogState } from "../components/AppDialogs";
 import type { CropRect } from "../components/CropDialog";
 import { downloadMediaFile } from "../components/download-media";
 import type { ToolbarHandlers } from "../components/HoverToolbar";
-import type { MaskPayload } from "../components/MaskDialog";
+import type { MaskSavePayload } from "../components/MaskDialog";
+import { maskCardSizeForAspect, parseGenSize } from "../components/mask-helpers";
 import type { SplitParams } from "../components/SplitDialog";
 import type { UpscaleParams } from "../components/UpscaleDialog";
 import { isToolNodeType } from "../node-utils";
@@ -41,6 +42,7 @@ export function useToolbarActions(opts: {
     prompt: string,
     title: string,
     extraRefs?: CanvasNode[],
+    ratio?: string,
   ) => CanvasNode | null;
   flushSave: () => Promise<void>;
   refreshGraphFromServer: () => Promise<void>;
@@ -270,7 +272,6 @@ export function useToolbarActions(opts: {
           : "已开启自由尺寸：节点可非等比拉伸",
       );
     },
-    onMaskEdit: (node) => setEditorDialog({ kind: "mask", node }),
     onCrop: (node) => setEditorDialog({ kind: "crop", node }),
     onSplit: (node) => setEditorDialog({ kind: "split", node }),
     onUpscale: (node) => setEditorDialog({ kind: "upscale", node }),
@@ -365,49 +366,51 @@ export function useToolbarActions(opts: {
   );
 
   const handleMaskConfirm = useCallback(
-    async (node: CanvasNode, payload: MaskPayload) => {
+    async (maskNode: CanvasNode, payload: MaskSavePayload) => {
       setEditorDialog(null);
       const pid = projectIdRef.current;
       if (!pid) return;
-      setGenBusyId(node.id);
+      setGenBusyId(maskNode.id);
       try {
+        await flushSave();
         const maskBase64 = payload.maskDataUrl.replace(/^data:image\/png;base64,/, "");
-        const uploaded = await api.uploadMedia({
-          projectId: pid,
-          kind: "image",
-          fileName: `${node.title || "图片"} · 蒙版.png`,
+        const strokesBase64 = payload.strokesDataUrl.replace(/^data:image\/png;base64,/, "");
+        const replaced = await api.replaceNodeMedia({
+          nodeId: maskNode.id,
+          fileName: maskNode.title || "绘制蒙版.png",
           mimeType: "image/png",
           dataBase64: maskBase64,
-          x: node.x,
-          y: node.y + node.height + 40,
-          width: node.width,
-          height: node.height,
+          strokesBase64,
+          maskStateJson: payload.maskStateJson,
         });
-        if (!nodesRef.current.some((n) => n.id === uploaded.node.id)) {
-          nodesRef.current = [...nodesRef.current, uploaded.node];
-          setNodes(nodesRef.current);
-        }
-        const maskNode = nodesRef.current.find((n) => n.id === uploaded.node.id) ?? uploaded.node;
-        const gen = createGeneratorNode(
-          node,
-          payload.prompt,
-          `${node.title || "图片"} · 蒙版重绘`,
-          [maskNode],
+        const savedMask = replaced.node;
+        const parsedSize = parseGenSize(savedMask.genSize);
+        const fitted =
+          !savedMask.freeResize && parsedSize
+            ? maskCardSizeForAspect(parsedSize.w, parsedSize.h)
+            : null;
+        const resizedMask =
+          fitted &&
+          (Math.abs(fitted.width - savedMask.width) > 2 ||
+            Math.abs(fitted.height - savedMask.height) > 2)
+            ? { ...savedMask, ...fitted }
+            : savedMask;
+        nodesRef.current = nodesRef.current.map((n) =>
+          n.id === resizedMask.id ? resizedMask : n,
         );
-        if (!gen) return;
-        await flushSave();
-        const res = await api.generateImage({ projectId: pid, nodeId: gen.id });
-        if (res.status === "working") showToast("蒙版重绘已开始后台生成（原图＋蒙版双参考近似重绘）");
-        else if (res.status === "done") showToast("生成完成，结果节点已上板");
-        else showToast(`蒙版重绘失败：${res.error ?? "未知原因"}`);
+        setNodes(nodesRef.current);
+        if (resizedMask !== savedMask && fitted) {
+          updateNode(resizedMask.id, fitted);
+        }
+        showToast("蒙版已保存到节点，可向右拖线生成图片");
       } catch {
-        showToast("蒙版重绘请求失败，请稍后重试");
+        showToast("保存蒙版失败，请稍后重试");
       } finally {
         setGenBusyId(null);
         void refreshGraphFromServer();
       }
     },
-    [createGeneratorNode, flushSave, nodesRef, projectIdRef, refreshGraphFromServer, setEditorDialog, setGenBusyId, setNodes, showToast],
+    [flushSave, nodesRef, projectIdRef, refreshGraphFromServer, setEditorDialog, setGenBusyId, setNodes, showToast, updateNode],
   );
 
   return {

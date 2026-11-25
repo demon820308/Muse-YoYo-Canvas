@@ -9,6 +9,7 @@ export const EXTENSION_ENTRIES: {
   { type: "video-compose", label: "视频配乐" },
   { type: "prompt-reverse", label: "逆推提示词" },
   { type: "audio-extract", label: "音频提取" },
+  { type: "image-mask", label: "绘制蒙版" },
   { type: "sticky-note", label: "便签" },
 ];
 

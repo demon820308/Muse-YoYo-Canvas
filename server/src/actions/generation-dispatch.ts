@@ -4,7 +4,8 @@ import { z, type Ctx } from "@hatch/space-sdk";
 import { eq } from "drizzle-orm";
 import * as schema from "../schema";
 import { type Db, type NodeRow } from "./contracts";
-import { buildGenerationContext, type GenResource } from "./generation-context";
+import { buildGenerationContext, resolveMaskGenerationContext, type GenResource } from "./generation-context";
+import type { MaskEditMode } from "./mask-prompt";
 import { getNodeRow, getProjectRow, attachResultNode, landMediaResult, recordMediaAsset, markFailed } from "./graph-helpers";
 import { expandHome } from "./project-dirs";
 import { normalizeImageRatio, DIRECT_IMAGE_RATIOS, orientationForRatio, clampVideoSeconds, sizeBrief } from "./ratios";
@@ -117,16 +118,120 @@ async function spawnImageGeneration(
  *    exact pixel size of the node's normalized ratio.
  * The empty-prompt failure is decided on the assembled prompt
  * before any routing, exactly as before. */
+async function dispatchAgyImageGeneration(
+  ctx: Ctx,
+  db: Db,
+  node: NodeRow,
+  prompt: string,
+  refs: GenResource[],
+): Promise<GenDispatch> {
+  if (!ctx.localAgy || !(await ctx.localAgy.isReady())) {
+    const message =
+      "AGY CLI 尚未部署、登录或启用，请先在顶部「AGY 引擎」完成配置";
+    await markFailed(db, node.id, message);
+    return { status: "failed", error: message };
+  }
+  const missing = refs.filter((r) => !r.filePath);
+  if (missing.length > 0) {
+    const message = `有 ${missing.length} 张参考图还没同步进项目目录，暂时无法带参考生成；打开画布稍等同步完成后再试`;
+    await markFailed(db, node.id, message);
+    return { status: "failed", error: message };
+  }
+  const project = await getProjectRow(db, node.projectId);
+  const outputDir = project
+    ? expandHome(project.workspaceDir)
+    : expandHome("~/workspace/yoyo-canvas-projects");
+  const ratio = normalizeImageRatio(node.genRatio);
+  const refFilePaths = refs.map((r) => expandHome(r.filePath!));
+  const title = node.title ? `${node.title} · Nano Banana` : "Nano Banana 生图";
+  let taskId = "";
+  taskId = ctx.localAgy.startTask(async ({ signal }) => {
+    try {
+      const produced = await ctx.localAgy!.generateImage({
+        prompt,
+        ratio,
+        refFilePaths,
+        outputDir,
+        fileNameBase: `nb-${node.id.slice(0, 8)}`,
+        signal,
+      });
+      if (signal.aborted) return;
+      const current = await getNodeRow(db, node.id);
+      if (
+        !current ||
+        (current.genStatus !== "working" && current.genStatus !== "queued") ||
+        current.genTaskId !== taskId
+      ) {
+        return;
+      }
+      const { deliverGeneratedFile } = await import("./generation");
+      await deliverGeneratedFile(
+        ctx,
+        db,
+        { nodeId: node.id, filePath: produced.filePath, title },
+        "image",
+      );
+    } catch (err) {
+      if (signal.aborted) return;
+      const current = await getNodeRow(db, node.id);
+      if (
+        !current ||
+        (current.genStatus !== "working" && current.genStatus !== "queued") ||
+        current.genTaskId !== taskId
+      ) {
+        return;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      await markFailed(db, node.id, message);
+    }
+  });
+  await db
+    .update(schema.canvasNodes)
+    .set({
+      genStatus: "working",
+      genKind: "image",
+      genError: null,
+      genRatio: ratio,
+      genTaskId: taskId,
+      genStartedAt: new Date(),
+      status: "loading",
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.canvasNodes.id, node.id));
+  return { status: "working", error: null };
+}
+
 export async function dispatchImageGeneration(
   ctx: Ctx,
   db: Db,
   node: NodeRow,
+  engineOverride?: "muse" | "agy",
+  maskMode?: MaskEditMode,
 ): Promise<GenDispatch> {
   const rawPrompt = nodeOwnPrompt(node);
-  const context = await buildGenerationContext(db, node, rawPrompt);
+  const rawContext = await buildGenerationContext(db, node, rawPrompt);
+  const { context, maskError } = await resolveMaskGenerationContext(
+    db,
+    node,
+    rawContext,
+    maskMode,
+  );
+  if (maskError) {
+    await markFailed(db, node.id, maskError);
+    return { status: "failed", error: maskError };
+  }
   if (!context.prompt) {
     await markFailed(db, node.id, EMPTY_PROMPT_MESSAGE);
     return { status: "failed", error: EMPTY_PROMPT_MESSAGE };
+  }
+  const defaultEngine =
+    node.type === "image" && ctx.localAgy && (await ctx.localAgy.isReady())
+      ? "agy"
+      : "muse";
+  const engine =
+    engineOverride ?? ctx.localAgy?.getNodeEngine(node.id, defaultEngine) ?? "muse";
+  if (engine === "agy") {
+    return dispatchAgyImageGeneration(ctx, db, node, context.prompt, context.imageRefs);
   }
   const ratio = normalizeImageRatio(node.genRatio);
   const hasReferenceMedia = context.refs.some(
@@ -376,6 +481,7 @@ async function dispatchConfigText(
   ctx: Ctx,
   db: Db,
   node: NodeRow,
+  engineOverride?: "muse" | "agy",
 ): Promise<GenDispatch> {
   const rawPrompt = nodeOwnPrompt(node);
   const context = await buildGenerationContext(db, node, rawPrompt);
@@ -383,6 +489,77 @@ async function dispatchConfigText(
     const message = "请先在配置节点里填写提示词，或连入文字节";
     await markFailed(db, node.id, message);
     return { status: "failed", error: message };
+  }
+  const defaultEngine =
+    node.type === "image" && ctx.localAgy && (await ctx.localAgy.isReady())
+      ? "agy"
+      : "muse";
+  const engine =
+    engineOverride ?? ctx.localAgy?.getNodeEngine(node.id, defaultEngine) ?? "muse";
+  if (engine === "agy") {
+    if (!ctx.localAgy || !(await ctx.localAgy.isReady())) {
+      const message =
+        "AGY CLI 尚未部署、登录或启用，请先在顶部「AGY 引擎」完成配置";
+      await markFailed(db, node.id, message);
+      return { status: "failed", error: message };
+    }
+    let taskId = "";
+    taskId = ctx.localAgy.startTask(async ({ signal }) => {
+      try {
+        const res = await ctx.localAgy!.completeText({
+          prompt: [
+            `任务要求：${context.prompt}`,
+            `只输出正文，不要解释你的写作过程。`,
+          ].join("\n\n"),
+          system: "你是一位文字创作者，按用户的要求直接产出可用的文字成品",
+          timeoutMs: INFERENCE_TIMEOUT_SECS * 1000,
+          signal,
+        });
+        if (signal.aborted) return;
+        const current = await getNodeRow(db, node.id);
+        if (
+          !current ||
+          (current.genStatus !== "working" && current.genStatus !== "queued") ||
+          current.genTaskId !== taskId
+        ) {
+          return;
+        }
+        await attachResultNode(db, current, {
+          type: "text",
+          mediaBlobKey: null,
+          mimeType: null,
+          filePath: null,
+          title: current.title ? `${current.title} · 文本` : "生成文本",
+          content: res.text,
+          prompt: res.text,
+        });
+      } catch (err) {
+        if (signal.aborted) return;
+        const current = await getNodeRow(db, node.id);
+        if (
+          !current ||
+          (current.genStatus !== "working" && current.genStatus !== "queued") ||
+          current.genTaskId !== taskId
+        ) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        await markFailed(db, node.id, message);
+      }
+    });
+    await db
+      .update(schema.canvasNodes)
+      .set({
+        genStatus: "working",
+        genKind: "text",
+        genError: null,
+        genTaskId: taskId,
+        genStartedAt: new Date(),
+        status: "loading",
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.canvasNodes.id, node.id));
+    return { status: "working", error: null };
   }
   try {
     const result = await ctx.inference.complete(
@@ -433,12 +610,14 @@ export async function dispatchConfigGeneration(
   ctx: Ctx,
   db: Db,
   node: NodeRow,
+  engineOverride?: "muse" | "agy",
+  maskMode?: MaskEditMode,
 ): Promise<GenDispatch> {
   const mode = node.genMode ?? "image";
-  if (mode === "text") return dispatchConfigText(ctx, db, node);
+  if (mode === "text") return dispatchConfigText(ctx, db, node, engineOverride);
   if (mode === "audio") return dispatchAudioGeneration(ctx, db, node);
   if (mode === "video") return dispatchVideoGeneration(ctx, db, node);
-  return dispatchImageGeneration(ctx, db, node);
+  return dispatchImageGeneration(ctx, db, node, engineOverride, maskMode);
 }
 
 export async function dispatchGeneration(
@@ -446,11 +625,12 @@ export async function dispatchGeneration(
   db: Db,
   node: NodeRow,
   kind: "image" | "video" | "audio" | "text",
+  engineOverride?: "muse" | "agy",
 ): Promise<GenDispatch> {
   if (kind === "video") return dispatchVideoGeneration(ctx, db, node);
   if (kind === "audio") return dispatchAudioGeneration(ctx, db, node);
-  if (kind === "text") return dispatchConfigText(ctx, db, node);
-  return dispatchImageGeneration(ctx, db, node);
+  if (kind === "text") return dispatchConfigText(ctx, db, node, engineOverride);
+  return dispatchImageGeneration(ctx, db, node, engineOverride);
 }
 
 /** The generation kind a queued node will run with: config nodes use

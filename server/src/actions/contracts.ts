@@ -22,16 +22,18 @@ export const nodeType = z.enum([
   "audio-extract",
   "video-compose",
   "prompt-reverse",
+  "image-mask",
   "sticky-note",
 ]);
 
-/** The four tool node types (run via runToolNode, never via generation). */
+/** The tool node types. */
 export const TOOL_TYPES = new Set<string>([
   "video-frames",
   "video-relay",
   "audio-extract",
   "video-compose",
   "prompt-reverse",
+  "image-mask",
 ]);
 
 export const nodeStatus = z.enum(["idle", "loading", "success", "error"]);

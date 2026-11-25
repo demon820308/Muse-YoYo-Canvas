@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { IconCheck, IconPlus, IconTrash, IconX } from "../icons";
+import { formatAgyModelShortName, useAgyStatus } from "../hooks/use-agy";
 
-export type AgentProvider = "muse" | "openai" | "anthropic";
+export type AgentProvider = "muse" | "openai" | "anthropic" | "agy";
 
 export type MaskedAgentProfile = {
   id: string;
@@ -12,6 +13,8 @@ export type MaskedAgentProfile = {
   apiKeyMasked: string;
   hasApiKey: boolean;
   builtin?: boolean;
+  ready?: boolean;
+  modelLabel?: string;
 };
 
 type TestResult = {
@@ -36,23 +39,107 @@ export function AgentConfigModal({
   onRefresh: () => Promise<void>;
   showToast: (msg: string) => void;
 }) {
+  const agy = useAgyStatus();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<"openai" | "anthropic">("openai");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [editingMaskedKey, setEditingMaskedKey] = useState("");
   const [model, setModel] = useState("");
+  const [models, setModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [formOpen, setFormOpen] = useState(false);
+  const fetchSeqRef = useRef(0);
+
+  const resolveSubmitApiKey = useCallback(
+    (rawKey: string) =>
+      editingId && rawKey.trim() === editingMaskedKey ? "" : rawKey,
+    [editingId, editingMaskedKey],
+  );
+
+  const fetchModels = useCallback(
+    async (opts: {
+      id?: string | null;
+      provider: "openai" | "anthropic";
+      baseUrl: string;
+      apiKey: string;
+    }) => {
+      const urlTrimmed = opts.baseUrl.trim();
+      if (!/^https?:\/\/.+/i.test(urlTrimmed)) return;
+      const seq = ++fetchSeqRef.current;
+      setLoadingModels(true);
+      setModelsError(null);
+      try {
+        const resp = await fetch("/agent/models", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            ...(opts.id ? { id: opts.id } : {}),
+            provider: opts.provider,
+            baseUrl: urlTrimmed,
+            apiKey: opts.apiKey,
+          }),
+        });
+        const data = (await resp.json().catch(() => ({}))) as {
+          ok?: boolean;
+          models?: string[];
+          error?: string;
+        };
+        if (seq !== fetchSeqRef.current) return;
+        if (!resp.ok || !data.ok || !Array.isArray(data.models)) {
+          setModels([]);
+          setModelsError(data.error ?? "拉取模型列表失败");
+          return;
+        }
+        setModels(data.models);
+        setModel((prev) =>
+          prev && data.models!.includes(prev) ? prev : (data.models![0] ?? prev),
+        );
+      } catch (err) {
+        if (seq !== fetchSeqRef.current) return;
+        setModels([]);
+        setModelsError(err instanceof Error ? err.message : "拉取模型列表失败");
+      } finally {
+        if (seq === fetchSeqRef.current) {
+          setLoadingModels(false);
+        }
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!open) return;
     setTestResult(null);
     setFormOpen(false);
     setEditingId(null);
-  }, [open]);
+    setEditingMaskedKey("");
+    setModels([]);
+    setModelsError(null);
+    void onRefresh();
+  }, [open, onRefresh]);
+
+  useEffect(() => {
+    if (!open || !formOpen) return;
+    const urlTrimmed = baseUrl.trim();
+    const submitKey = resolveSubmitApiKey(apiKey);
+    const hasKey = Boolean(editingId) || Boolean(submitKey.trim());
+    if (!/^https?:\/\/.+/i.test(urlTrimmed) || !hasKey) return;
+    const timer = setTimeout(() => {
+      void fetchModels({
+        id: editingId,
+        provider,
+        baseUrl: urlTrimmed,
+        apiKey: submitKey,
+      });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [open, formOpen, editingId, provider, baseUrl, apiKey, resolveSubmitApiKey, fetchModels]);
 
   if (!open) return null;
 
@@ -62,19 +149,25 @@ export function AgentConfigModal({
     setProvider("openai");
     setBaseUrl("https://api.openai.com/v1");
     setApiKey("");
+    setEditingMaskedKey("");
     setModel("gpt-4o-mini");
+    setModels([]);
+    setModelsError(null);
     setTestResult(null);
     setFormOpen(true);
   };
 
   const startEdit = (p: MaskedAgentProfile) => {
-    if (p.builtin || p.provider === "muse") return;
+    if (p.builtin || p.provider === "muse" || p.provider === "agy") return;
     setEditingId(p.id);
     setName(p.name);
     setProvider(p.provider);
     setBaseUrl(p.baseUrl);
-    setApiKey("");
+    setApiKey(p.apiKeyMasked);
+    setEditingMaskedKey(p.apiKeyMasked);
     setModel(p.model);
+    setModels([]);
+    setModelsError(null);
     setTestResult(null);
     setFormOpen(true);
   };
@@ -151,7 +244,7 @@ export function AgentConfigModal({
           name,
           provider,
           baseUrl,
-          apiKey,
+          apiKey: resolveSubmitApiKey(apiKey),
           model,
           activate: true,
         }),
@@ -185,7 +278,7 @@ export function AgentConfigModal({
           <div>
             <h3 className="text-sm font-semibold">Agent 模型配置</h3>
             <p className="text-[11px] text-[var(--dim)]">
-              支持 Muse (YoYo桥) 与自定义 OpenAI / Anthropic 端点
+              支持 Muse (YoYo桥)、本地 AGY CLI 与自定义 OpenAI / Anthropic 端点
             </p>
           </div>
           <button
@@ -201,6 +294,15 @@ export function AgentConfigModal({
         <div className="max-h-60 space-y-2 overflow-y-auto pr-1">
           {profiles.map((p) => {
             const active = p.id === activeProfileId;
+            const agyReady = p.provider === "agy" ? (agy.status ? agy.ready : Boolean(p.ready)) : true;
+            const titleText =
+              p.provider === "muse"
+                ? p.name
+                : p.provider === "agy"
+                  ? agyReady
+                    ? `${formatAgyModelShortName(agy.status?.model || p.model, agy.status?.models, p.modelLabel)} · AGY`
+                    : "AGY（未就绪）"
+                  : p.model.trim() || p.name;
             return (
               <div
                 key={p.id}
@@ -212,7 +314,7 @@ export function AgentConfigModal({
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
-                    <span className="truncate font-medium">{p.name}</span>
+                    <span className="truncate font-medium">{titleText}</span>
                     <span className="rounded bg-[var(--hover)] px-1.5 py-0.5 text-[10px] uppercase text-[var(--dim)]">
                       {p.provider}
                     </span>
@@ -225,13 +327,17 @@ export function AgentConfigModal({
                   <div className="mt-0.5 truncate text-[11px] text-[var(--dim)]">
                     {p.provider === "muse"
                       ? "通过 YoYo桥 调用 Muse 账号推理（免 API Key）"
-                      : `${p.model} · ${p.baseUrl}${p.hasApiKey ? ` · ${p.apiKeyMasked}` : ""}`}
+                      : p.provider === "agy"
+                        ? agyReady
+                          ? `使用本机 AGY CLI（${agy.status?.model || p.model}，免 API Key）`
+                          : "未就绪：请先在顶部「AGY 引擎」完成部署、登录并启用"
+                        : `${p.name ? `${p.name} · ` : ""}${p.baseUrl}${p.hasApiKey ? ` · ${p.apiKeyMasked}` : ""}`}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                   <button
                     type="button"
-                    disabled={testing}
+                    disabled={testing || (p.provider === "agy" && !agyReady)}
                     onClick={() => handleTest({ id: p.id, provider: p.provider })}
                     className="rounded-lg border border-[var(--border)] px-2 py-1 text-[11px] hover:bg-[var(--hover)] disabled:opacity-50"
                   >
@@ -240,8 +346,9 @@ export function AgentConfigModal({
                   {!active ? (
                     <button
                       type="button"
+                      disabled={p.provider === "agy" && !agyReady}
                       onClick={() => handleActivate(p.id)}
-                      className="rounded-lg bg-[var(--text)] px-2 py-1 text-[11px] text-[var(--bg)] hover:opacity-90"
+                      className="rounded-lg bg-[var(--text)] px-2 py-1 text-[11px] text-[var(--bg)] hover:opacity-90 disabled:opacity-40"
                     >
                       使用
                     </button>
@@ -348,29 +455,72 @@ export function AgentConfigModal({
                 className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs outline-none focus:border-[var(--accent)]"
               />
             </label>
-            <div className="grid grid-cols-2 gap-2">
-              <label className="space-y-1">
-                <span className="block text-[11px] text-[var(--dim)]">
-                  API Key{editingId ? "（留空则保留原 Key）" : ""}
+            <div className="grid grid-cols-2 items-start gap-2">
+              <label className="block space-y-1">
+                <span className="flex h-4 items-center text-[11px] text-[var(--dim)]">
+                  API Key{editingId ? "（留空或保持不变则保留原 Key）" : ""}
                 </span>
                 <input
-                  type="password"
+                  type={
+                    editingId && editingMaskedKey && apiKey === editingMaskedKey
+                      ? "text"
+                      : "password"
+                  }
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
+                  onFocus={(e) => {
+                    if (editingId && editingMaskedKey && apiKey === editingMaskedKey) {
+                      e.currentTarget.select();
+                    }
+                  }}
                   placeholder="sk-..."
-                  className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs outline-none focus:border-[var(--accent)]"
+                  className="h-8 w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 text-xs outline-none focus:border-[var(--accent)]"
                 />
               </label>
-              <label className="space-y-1">
-                <span className="block text-[11px] text-[var(--dim)]">Model 名称</span>
-                <input
-                  type="text"
+              <div className="space-y-1">
+                <div className="flex h-4 items-center justify-between">
+                  <span className="text-[11px] text-[var(--dim)]">Model 名称</span>
+                  <button
+                    type="button"
+                    disabled={loadingModels || !/^https?:\/\/.+/i.test(baseUrl.trim())}
+                    onClick={() =>
+                      void fetchModels({
+                        id: editingId,
+                        provider,
+                        baseUrl,
+                        apiKey: resolveSubmitApiKey(apiKey),
+                      })
+                    }
+                    className="text-[11px] leading-none text-[var(--accent)] hover:underline disabled:opacity-40"
+                  >
+                    {loadingModels ? "拉取中…" : "刷新列表"}
+                  </button>
+                </div>
+                <select
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
-                  placeholder={provider === "anthropic" ? "claude-sonnet-4-20250514" : "gpt-4o-mini"}
-                  className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs outline-none focus:border-[var(--accent)]"
-                />
-              </label>
+                  disabled={loadingModels && models.length === 0}
+                  aria-label="Model 名称"
+                  className="h-8 w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 text-xs outline-none focus:border-[var(--accent)] disabled:opacity-60"
+                >
+                  {model && !models.includes(model) ? (
+                    <option value={model}>{model}</option>
+                  ) : null}
+                  {models.length === 0 && !model ? (
+                    <option value="">请先填写地址与 Key 拉取模型</option>
+                  ) : null}
+                  {models.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+                {modelsError ? (
+                  <p className="truncate text-[10px] text-[var(--danger)]" title={modelsError}>
+                    {modelsError}
+                  </p>
+                ) : null}
+              </div>
             </div>
             <div className="flex items-center justify-end gap-2 pt-1">
               <button
@@ -381,7 +531,7 @@ export function AgentConfigModal({
                     ...(editingId ? { id: editingId } : {}),
                     provider,
                     baseUrl,
-                    apiKey,
+                    apiKey: resolveSubmitApiKey(apiKey),
                     model,
                   })
                 }

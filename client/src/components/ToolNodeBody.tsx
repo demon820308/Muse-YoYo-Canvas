@@ -33,6 +33,7 @@ import {
 } from "../types";
 import { isToolNodeType } from "../node-utils";
 import { VideoDurationSelect } from "./VideoDurationSelect";
+import { useAgyStatus, type AgyEngine } from "../hooks/use-agy";
 
 export type ToolRunOptions = {
   framesAction?: FramesAction;
@@ -41,6 +42,7 @@ export type ToolRunOptions = {
   lastOffsetSec?: number;
   loopAudio?: boolean;
   reverseMode?: ReverseMode;
+  engine?: "muse" | "agy";
 };
 
 type ToolOptionsState = {
@@ -141,7 +143,9 @@ export function ToolNodeBody({
   onPatchNode?: (id: string, patch: Partial<CanvasNode>) => void;
   onRun: (node: CanvasNode, options?: ToolRunOptions) => void;
 }) {
+  const agy = useAgyStatus();
   const { opts, patch } = useToolOptions(node.id);
+  const reverseEngine: AgyEngine = agy.effectiveEngineFor(node.id);
   const fb = feedback ?? EMPTY_RUN_FEEDBACK;
   // A run is live from the local click (feedback.activeKey) — not
   // only once the server's genStatus lands — so the buttons react
@@ -199,6 +203,7 @@ export function ToolNodeBody({
   });
   const videoInput = inputs.find((n) => n.type === "video");
   const audioInput = inputs.find((n) => n.type === "audio");
+  const imageInput = inputs.find((n) => n.type === "image" && Boolean(n.mediaUrl));
   const stopPd = (e: React.PointerEvent) => e.stopPropagation();
   const chipBtn = (active: boolean) =>
     `rounded-md px-1.5 py-1 text-[11px] ${
@@ -455,8 +460,56 @@ export function ToolNodeBody({
           </div>
           {hint}
         </>
+      ) : node.type === "image-mask" ? (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => onRun(node, undefined)}
+              onPointerDown={stopPd}
+              disabled={running || !imageInput}
+              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs ${RUN_PRIMARY} disabled:opacity-40`}
+              aria-label={node.mediaUrl ? "编辑蒙版" : "绘制蒙版"}
+            >
+              {node.mediaUrl ? "编辑蒙版" : "绘制蒙版"}
+            </button>
+            <span className="truncate text-[11px] text-[var(--dim)]">
+              {imageInput ? `原图：${imageInput.title}` : "未连入图片"}
+            </span>
+          </div>
+          {node.mediaUrl ? (
+            <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-[var(--border)] bg-black/50">
+              <img
+                src={node.mediaUrl}
+                alt={node.title}
+                className="h-full w-full object-contain"
+                draggable={false}
+              />
+            </div>
+          ) : (
+            hint
+          )}
+        </>
       ) : (
         <>
+          <div className="flex items-center justify-between gap-1.5">
+            <span className="text-[11px] text-[var(--dim)]">推理通道</span>
+            <select
+              value={reverseEngine}
+              onChange={(e) => {
+                const next = e.target.value as AgyEngine;
+                void agy.setNodeEngine(node.id, next);
+              }}
+              onPointerDown={stopPd}
+              aria-label="提示词逆推通道"
+              className="rounded-md border border-[var(--border)] bg-[var(--surface-2)] px-1.5 py-0.5 text-[11px] text-[var(--text)] outline-none focus:border-[var(--accent)]"
+            >
+              <option value="muse">Muse 桥（默认）</option>
+              <option value="agy" disabled={!agy.ready}>
+                {agy.ready ? `${agy.shortModelName} · AGY` : "AGY（需部署并登录）"}
+              </option>
+            </select>
+          </div>
           <div
             className="flex flex-wrap gap-1"
             role="group"
@@ -484,7 +537,7 @@ export function ToolNodeBody({
                   type="button"
                   onClick={() => {
                     patch({ reverseMode: o.mode });
-                    onRun(node, { reverseMode: o.mode });
+                    onRun(node, { reverseMode: o.mode, engine: reverseEngine });
                   }}
                   onPointerDown={stopPd}
                   disabled={running}

@@ -10,7 +10,6 @@ export type ImageToolId =
   | "reversePrompt"
   | "replace"
   | "resize"
-  | "maskEdit"
   | "crop"
   | "split"
   | "upscale"
@@ -37,7 +36,6 @@ export const IMAGE_TOOL_DEFS: {
   { id: "reversePrompt", label: "逆推提示词", defaultVisible: true },
   { id: "replace", label: "替换", defaultVisible: true },
   { id: "resize", label: "自由尺寸", defaultVisible: false },
-  { id: "maskEdit", label: "蒙版编辑", defaultVisible: true },
   { id: "crop", label: "裁剪", defaultVisible: true },
   { id: "split", label: "宫格切分", defaultVisible: true },
   { id: "upscale", label: "放大", defaultVisible: true },
