@@ -87,7 +87,7 @@ export function useCanvasView(opts: {
         zoom,
       });
       setFlashId(id);
-      window.setTimeout(() => setFlashId((cur) => (cur === id ? null : cur)), 1000);
+      window.setTimeout(() => setFlashId((cur) => (cur === id ? null : cur)), 3500);
       if (window.innerWidth < NARROW_BREAKPOINT_PX) setPanelOpen(false);
     },
     [applyViewport, canvasRef, nodesRef, setEditorSuppressed, setFlashId, setPanelOpen, suppressedEditorRef, updateSelectedIds, viewportRef],

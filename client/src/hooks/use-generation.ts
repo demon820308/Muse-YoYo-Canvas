@@ -241,7 +241,7 @@ const refreshGraphFromServer = useCallback(async () => {
         setFlashId(sn.id);
         window.setTimeout(
           () => setFlashId((cur) => (cur === sn.id ? null : cur)),
-          1100,
+          3500,
         );
       }
     }

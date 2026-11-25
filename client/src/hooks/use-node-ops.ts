@@ -199,7 +199,7 @@ const flashNode = useCallback((id: string) => {
   setFlashId(id);
   window.setTimeout(
     () => setFlashId((cur) => (cur === id ? null : cur)),
-    1100,
+    3500,
   );
 }, []);
 

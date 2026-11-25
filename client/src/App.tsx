@@ -510,7 +510,7 @@ export function App() {
         zoom,
       });
       setFlashId(id);
-      window.setTimeout(() => setFlashId((cur) => (cur === id ? null : cur)), 2500);
+      window.setTimeout(() => setFlashId((cur) => (cur === id ? null : cur)), 3500);
     },
     [agentOpen, applyViewport, canvasRef, nodesRef, setEditorSuppressed, setFlashId, viewportRef],
   );
