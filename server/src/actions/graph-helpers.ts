@@ -72,6 +72,53 @@ return { x: source.x + source.width + 72, y: source.y, width: s.w, height: s.h};
  * The anchor is re-read at landing time: runs are async (prompt-
  * reverse inference can take up to two minutes), and the source row
  * the caller holds may predate a mid-run drag of the source node. */
+type Rect = { x: number; y: number; width: number; height: number };
+
+/** Finds the nearest non-overlapping (x, y) on a bounded 3×4 grid
+ * starting from (baseX, baseY). Falls back to (baseX, baseY) when
+ * every candidate in range is occupied. */
+export function findFreeSpot(
+  baseX: number,
+  baseY: number,
+  width: number,
+  height: number,
+  siblings: Rect[],
+): { x: number; y: number } {
+  const overlaps = (xx: number, yy: number) =>
+    siblings.some(
+      (s) =>
+        xx < s.x + s.width &&
+        xx + width > s.x &&
+        yy < s.y + s.height &&
+        yy + height > s.y,
+    );
+  if (!overlaps(baseX, baseY)) {
+    return { x: baseX, y: baseY };
+  }
+  const stepX = width + 48;
+  const stepY = height + 28;
+  const candidates: { x: number; y: number; dist2: number }[] = [];
+  for (let col = 0; col <= 2; col += 1) {
+    for (let row = 0; row <= 3; row += 1) {
+      if (col === 0 && row === 0) continue;
+      const dx = col * stepX;
+      const dy = row * stepY;
+      candidates.push({
+        x: baseX + dx,
+        y: baseY + dy,
+        dist2: dx * dx + dy * dy,
+      });
+    }
+  }
+  candidates.sort((a, b) => a.dist2 - b.dist2);
+  for (const candidate of candidates) {
+    if (!overlaps(candidate.x, candidate.y)) {
+      return { x: candidate.x, y: candidate.y };
+    }
+  }
+  return { x: baseX, y: baseY };
+}
+
 export async function placeResult(
 db: Db,
 source: NodeRow,
@@ -89,39 +136,8 @@ height: schema.canvasNodes.height,
 })
 .from(schema.canvasNodes)
 .where(eq(schema.canvasNodes.projectId, anchor.projectId));
-const overlaps = (xx: number, yy: number) =>
-siblings.some(
-(s) =>
-xx < s.x + s.width &&
-xx + place.width > s.x &&
-yy < s.y + s.height &&
-yy + place.height > s.y,
-);
-if (!overlaps(place.x, place.y)) {
-return place;
-}
-const stepX = place.width + 48;
-const stepY = place.height + 28;
-const candidates: { x: number; y: number; dist2: number }[] = [];
-for (let col = 0; col <= 2; col += 1) {
-for (let row = 0; row <= 3; row += 1) {
-if (col === 0 && row === 0) continue;
-const dx = col * stepX;
-const dy = row * stepY;
-candidates.push({
-x: place.x + dx,
-y: place.y + dy,
-dist2: dx * dx + dy * dy,
-});
-}
-}
-candidates.sort((a, b) => a.dist2 - b.dist2);
-for (const candidate of candidates) {
-if (!overlaps(candidate.x, candidate.y)) {
-return {...place, x: candidate.x, y: candidate.y};
-}
-}
-return place;
+const spot = findFreeSpot(place.x, place.y, place.width, place.height, siblings);
+return { ...place, x: spot.x, y: spot.y };
 }
 
 export async function attachResultNode(
@@ -139,6 +155,7 @@ filePath: string | null;
 genSize?: string | null;
 /** Measured duration (seconds) for audio results, probed from the file. */
 durationSeconds?: number | null;
+posterBlobKey?: string | null;
 },
 ): Promise<string> {
 const place = await placeResult(db, source, fields.type, fields.genSize);
@@ -190,6 +207,7 @@ fields.type === "image"
 mediaBlobKey: fields.mediaBlobKey,
 mimeType: fields.mimeType,
 filePath: fields.filePath,
+posterBlobKey: fields.posterBlobKey ?? null,
 sortOrder: countRows.length,
 createdAt: now,
 updatedAt: now,
@@ -246,6 +264,7 @@ export type MediaResultFields = {
   filePath: string | null;
   genSize?: string | null;
   durationSeconds?: number | null;
+  posterBlobKey?: string | null;
 };
 
 /** In-place delivery: a media node that generated its OWN kind (an
@@ -265,11 +284,36 @@ export async function fillResultIntoNode(
   source: NodeRow,
   fields: MediaResultFields,
 ): Promise<string> {
-  const place = resultPlacement(source, fields.type, fields.genSize);
+  const anchor = (await getNodeRow(db, source.id)) ?? source;
+  const place = resultPlacement(anchor, fields.type, fields.genSize);
+  let nextX = anchor.x;
+  let nextY = anchor.y;
+  if (place.width > anchor.width || place.height > anchor.height) {
+    const rows = await db
+      .select({
+        id: schema.canvasNodes.id,
+        type: schema.canvasNodes.type,
+        hidden: schema.canvasNodes.hidden,
+        x: schema.canvasNodes.x,
+        y: schema.canvasNodes.y,
+        width: schema.canvasNodes.width,
+        height: schema.canvasNodes.height,
+      })
+      .from(schema.canvasNodes)
+      .where(eq(schema.canvasNodes.projectId, anchor.projectId));
+    const siblings = rows.filter(
+      (r) => r.id !== anchor.id && r.type !== "group" && !r.hidden,
+    );
+    const spot = findFreeSpot(anchor.x, anchor.y, place.width, place.height, siblings);
+    nextX = spot.x;
+    nextY = spot.y;
+  }
   const now = new Date();
   await db
     .update(schema.canvasNodes)
     .set({
+      x: nextX,
+      y: nextY,
       width: place.width,
       height: place.height,
       content: "",
@@ -296,7 +340,7 @@ export async function fillResultIntoNode(
       mediaBlobKey: fields.mediaBlobKey,
       mimeType: fields.mimeType,
       filePath: fields.filePath,
-      posterBlobKey: null,
+      posterBlobKey: fields.posterBlobKey ?? null,
       // A stale playback proxy belongs to the previous file: clear it
       // with the poster so ensureProxy re-transcodes from the new one.
       proxyBlobKey: null,

@@ -322,4 +322,87 @@ describe("forkSiblingForRegen", () => {
       .where(eq(schema.canvasEdges.toNodeId, sibling.id));
     expect(edgesToSibling.map((e) => e.fromNodeId).sort()).toEqual(["up-1", "up-2"]);
   });
+
+  test("landMediaResult 携带 posterBlobKey 时与 genStatus=done 原子落库，未传则清空旧封面", async () => {
+    const db = await makeDb();
+    const videoNode = await seedNode(db, {
+      id: "v-atomic",
+      type: "video",
+      genStatus: "working",
+      genKind: "video",
+      genStartedAt: T0,
+    });
+    await landMediaResult(db, videoNode, {
+      type: "video",
+      title: "视频",
+      content: "",
+      mediaBlobKey: "media/proj-1/v1",
+      mimeType: "video/mp4",
+      filePath: null,
+      genSize: "1280x720",
+      posterBlobKey: "media/proj-1/v-atomic-poster",
+    });
+    const [afterAtomic] = await db
+      .select()
+      .from(schema.canvasNodes)
+      .where(eq(schema.canvasNodes.id, "v-atomic"));
+    expect(afterAtomic?.genStatus).toBe("done");
+    expect(afterAtomic?.posterBlobKey).toBe("media/proj-1/v-atomic-poster");
+
+    await landMediaResult(db, afterAtomic!, {
+      type: "video",
+      title: "视频",
+      content: "",
+      mediaBlobKey: "media/proj-1/v2",
+      mimeType: "video/mp4",
+      filePath: null,
+      genSize: "1280x720",
+    });
+    const [afterClear] = await db
+      .select()
+      .from(schema.canvasNodes)
+      .where(eq(schema.canvasNodes.id, "v-atomic"));
+    expect(afterClear?.posterBlobKey).toBeNull();
+  });
+
+  test("landMediaResult 原地回填放大尺寸撞到邻近节点时自动避让不重叠", async () => {
+    const db = await makeDb();
+    const videoNode = await seedNode(db, {
+      id: "v-expand",
+      type: "video",
+      x: 100,
+      y: 100,
+      width: 260,
+      height: 180,
+      genStatus: "working",
+      genKind: "video",
+      genStartedAt: T0,
+    });
+    // Neighbor 72px to the right of the 260px placeholder: expanding to 420px would overlap it.
+    await seedNode(db, {
+      id: "v-neighbor",
+      type: "image",
+      x: 100 + 260 + 72,
+      y: 100,
+      width: 200,
+      height: 200,
+    });
+    await landMediaResult(db, videoNode, {
+      type: "video",
+      title: "视频",
+      content: "",
+      mediaBlobKey: "media/proj-1/v-exp",
+      mimeType: "video/mp4",
+      filePath: null,
+      genSize: "1280x720",
+    });
+    const [updated] = await db
+      .select()
+      .from(schema.canvasNodes)
+      .where(eq(schema.canvasNodes.id, "v-expand"));
+    expect(updated?.width).toBe(420);
+    // Moved vertically below to avoid overlapping v-neighbor while keeping x=100.
+    expect(updated?.x).toBe(100);
+    expect(updated?.y).toBe(100 + updated!.height + 28);
+  });
 });

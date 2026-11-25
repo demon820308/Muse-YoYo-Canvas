@@ -197,8 +197,8 @@ const refreshGraphFromServer = useCallback(async () => {
           !frameMatchesGenSizeAspect(local.width, local.height, sn.genSize));
       return {
         ...sn,
-        x: local.x,
-        y: local.y,
+        x: adoptServerFrame ? sn.x : local.x,
+        y: adoptServerFrame ? sn.y : local.y,
         width: adoptServerFrame ? sn.width : local.width,
         height: adoptServerFrame ? sn.height : local.height,
         title: local.title,
