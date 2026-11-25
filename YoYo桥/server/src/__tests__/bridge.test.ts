@@ -14,6 +14,7 @@ import type { Ctx } from "@hatch/space-sdk";
 import { Contracts } from "@space/privileged";
 import * as schema from "../schema";
 import {
+CONNECTION_ONLINE_WINDOW_MS,
 acquireSyncLease,
 configIdForSlot,
 countBridgeJobsByStatus,
@@ -22,6 +23,7 @@ getBridgeConfig,
 getBridgeJob,
 insertBridgeJob,
 maskBridgeToken,
+pairingConnection,
 pairingIdForSlot,
 releaseSyncLease,
 slotOfPairingId,
@@ -1301,5 +1303,92 @@ describe("配对改名：label 按槽位独立", () => {
     expect(res.from.label).toBe("");
     expect((await getBridgeConfig(db, 2)).label).toBe("家里电脑");
     expect((await getBridgeConfig(db, 1)).label).toBe("");
+  });
+});
+
+describe("连接状态：pairingConnection 判定", () => {
+  const NOW = 1_800_000_000_000;
+  const paired = { baseUrl: "https://x.example", token: "tok-123456" };
+
+  test("未配对：无地址或无令牌都是 unpaired（与在线时间无关）", () => {
+    expect(
+      pairingConnection({ baseUrl: "", token: "", lastOnlineAt: null }, NOW),
+    ).toBe("unpaired");
+    expect(
+      pairingConnection(
+        { baseUrl: "https://x.example", token: "", lastOnlineAt: NOW },
+        NOW,
+      ),
+    ).toBe("unpaired");
+    expect(
+      pairingConnection({ baseUrl: "", token: "tok-123456", lastOnlineAt: NOW }, NOW),
+    ).toBe("unpaired");
+  });
+
+  test("已配对且刚在线 → connected", () => {
+    expect(pairingConnection({ ...paired, lastOnlineAt: NOW }, NOW)).toBe(
+      "connected",
+    );
+    expect(
+      pairingConnection({ ...paired, lastOnlineAt: NOW - 5_000 }, NOW),
+    ).toBe("connected");
+  });
+
+  test("已配对但从未在线（lastOnlineAt 为空）→ disconnected", () => {
+    expect(pairingConnection({ ...paired, lastOnlineAt: null }, NOW)).toBe(
+      "disconnected",
+    );
+  });
+
+  test("已配对但超过 30 秒未在线 → disconnected", () => {
+    expect(
+      pairingConnection(
+        { ...paired, lastOnlineAt: NOW - CONNECTION_ONLINE_WINDOW_MS - 1 },
+        NOW,
+      ),
+    ).toBe("disconnected");
+    expect(
+      pairingConnection({ ...paired, lastOnlineAt: NOW - 3_600_000 }, NOW),
+    ).toBe("disconnected");
+  });
+
+  test("阈值边界：恰好 30 秒整算 connected，30 秒 +1ms 算 disconnected", () => {
+    expect(CONNECTION_ONLINE_WINDOW_MS).toBe(30_000);
+    expect(
+      pairingConnection(
+        { ...paired, lastOnlineAt: NOW - CONNECTION_ONLINE_WINDOW_MS },
+        NOW,
+      ),
+    ).toBe("connected");
+    expect(
+      pairingConnection(
+        { ...paired, lastOnlineAt: NOW - CONNECTION_ONLINE_WINDOW_MS - 1 },
+        NOW,
+      ),
+    ).toBe("disconnected");
+  });
+
+  test("bridgeStatus 的 pairings 带 connection，两槽位各自独立判定", async () => {
+    const { db } = makeDb();
+    const { ctx } = makeFakeCtx(db);
+    // 槽位 1：已配对且刚刚在线 → connected
+    await updateBridgeConfig(db, 1, {
+      baseUrl: "https://one.example",
+      token: "tok-one-123",
+      lastOnlineAt: Date.now(),
+    });
+    // 槽位 2：已配对但最后在线在一分钟前 → disconnected
+    await updateBridgeConfig(db, 2, {
+      baseUrl: "https://two.example",
+      token: "tok-two-456",
+      lastOnlineAt: Date.now() - 60_000,
+    });
+    const status = await Actions.bridgeStatus.handler(ctx, {});
+    expect(status.pairings[0]?.connection).toBe("connected");
+    expect(status.pairings[1]?.connection).toBe("disconnected");
+    // 清掉槽位 2 的配对 → unpaired
+    await updateBridgeConfig(db, 2, { baseUrl: "", token: "" });
+    const status2 = await Actions.bridgeStatus.handler(ctx, {});
+    expect(status2.pairings[1]?.connection).toBe("unpaired");
   });
 });

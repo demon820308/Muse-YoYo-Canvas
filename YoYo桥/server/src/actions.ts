@@ -29,6 +29,7 @@ insertBridgeJob,
 listClearableFailedJobs,
 listRecentBridgeJobs,
 maskBridgeToken,
+pairingConnection,
 pairingIdForSlot,
 releaseSyncLease,
 slotOfPairingId,
@@ -436,6 +437,7 @@ const pairingStatus = z.object({
   slot: z.number(),
   label: z.string(),
   configured: z.boolean(),
+  connection: z.enum(["unpaired", "connected", "disconnected"]),
   baseUrl: z.string(),
   tokenMasked: z.string(),
   lastOnlineAt: z.string().nullable(),
@@ -629,7 +631,7 @@ export const Actions = {
 
   bridgeStatus: defineAction({
     description:
-      "Reports the bridge pairing state for both slots: a pairings array with each slot's custom name label (raw stored value, empty when never renamed), configured flag, tunnel base URL, masked token, last online/error and lease state; the top-level fields mirror slot 1 for compatibility; plus global job counts by state (including how many failed records can be cleared) and the 10 most recent jobs, each tagged with its pairing slot.",
+      "Reports the bridge pairing state for both slots: a pairings array with each slot's custom name label (raw stored value, empty when never renamed), configured flag, connection state computed at response time (unpaired when the slot has no address/token, connected when its last successful sync was within 30 seconds, otherwise disconnected), tunnel base URL, masked token, last online/error and lease state; the top-level fields mirror slot 1 for compatibility; plus global job counts by state (including how many failed records can be cleared) and the 10 most recent jobs, each tagged with its pairing slot.",
     request: z.object({}),
     response: z.object({
       configured: z.boolean(),
@@ -670,6 +672,7 @@ export const Actions = {
             slot,
             label: config.label,
             configured: Boolean(config.baseUrl && config.token),
+            connection: pairingConnection(config, now),
             baseUrl: config.baseUrl,
             tokenMasked: maskBridgeToken(config.token),
             lastOnlineAt: iso(config.lastOnlineAt),

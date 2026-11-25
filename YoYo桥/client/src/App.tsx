@@ -1,7 +1,9 @@
 // YoYo桥设置页：两个配对槽位（配对 1 / 配对 2）各自独立的状态、
 // 表单与清除确认；每个槽位可单独改名（自定义名优先显示，槽位号以
-// 小徽标保留），任务计数与失败记录清除为全局。调 bridgeStatus /
-// bridgeSetConfig / bridgeClearFailed 三个动作；bridgeStatus 每
+// 小徽标保留），槽位头展示服务端算好的连接状态徽标（已连接/已断开/
+// 未配对），页面顶部有一行按两槽位 connection 现算的汇总；任务计数
+// 与失败记录清除为全局。调 bridgeStatus / bridgeSetConfig /
+// bridgeClearFailed 三个动作；bridgeStatus 每
 // 5 秒自动轮询（与后台同步节奏对齐），标签页切到后台时自动暂停；
 // 保存与清除后也会立即刷新状态。
 
@@ -34,6 +36,20 @@ function displayName(pairing: Pairing): string {
   const trimmed = pairing.label.trim();
   return trimmed || `配对 ${pairing.slot}`;
 }
+
+/** 连接状态徽标：服务端按响应时刻算好（connection 字段），页面只
+ * 负责配色与文案——绿已连接、红已断开、灰未配对。 */
+const CONNECTION_LABEL: Record<Pairing["connection"], string> = {
+  connected: "已连接",
+  disconnected: "已断开",
+  unpaired: "未配对",
+};
+
+const CONNECTION_DOT: Record<Pairing["connection"], string> = {
+  connected: "bg-emerald-600",
+  disconnected: "bg-red-600",
+  unpaired: "bg-zinc-400",
+};
 
 const STATUS_LABEL: Record<string, string> = {
   queued: "待处理",
@@ -149,10 +165,10 @@ function PairingSection({ pairing }: { pairing: Pairing }) {
         ) : null}
         <span
           aria-hidden
-          className={`inline-block h-2.5 w-2.5 rounded-full ${pairing.configured ? "bg-emerald-600" : "bg-zinc-400"}`}
+          className={`inline-block h-2.5 w-2.5 rounded-full ${CONNECTION_DOT[pairing.connection]}`}
         />
-        <span className="text-sm">
-          {pairing.configured ? "已配对" : "未配对"}
+        <span className="text-sm font-medium">
+          {CONNECTION_LABEL[pairing.connection]}
         </span>
         <span className="ml-auto text-xs text-[var(--dim)]">
           同步租约：{pairing.leaseHeld ? "持有中" : "空闲"}
@@ -174,7 +190,15 @@ function PairingSection({ pairing }: { pairing: Pairing }) {
         </div>
         <div className="flex gap-3">
           <dt className="w-24 shrink-0 text-[var(--dim)]">本地最后在线</dt>
-          <dd>{formatTime(pairing.lastOnlineAt)}</dd>
+          <dd
+            className={
+              pairing.connection === "disconnected"
+                ? "font-medium text-red-600 dark:text-red-400"
+                : undefined
+            }
+          >
+            {formatTime(pairing.lastOnlineAt)}
+          </dd>
         </div>
         {pairing.lastError ? (
           <div className="flex gap-3">
@@ -445,6 +469,29 @@ export function App() {
           </div>
         ) : data ? (
           <>
+            {/* 连接状态汇总：按两槽位的 connection 现算，非零项才列 */}
+            <p className="mt-4 text-sm text-[var(--dim)]">
+              {(() => {
+                const connected = data.pairings.filter(
+                  (p) => p.connection === "connected",
+                ).length;
+                const disconnected = data.pairings.filter(
+                  (p) => p.connection === "disconnected",
+                ).length;
+                const unpaired = data.pairings.filter(
+                  (p) => p.connection === "unpaired",
+                ).length;
+                if (unpaired === data.pairings.length) {
+                  return `共 ${data.pairings.length} 个配对：均未配对`;
+                }
+                const parts: string[] = [];
+                if (connected > 0) parts.push(`${connected} 已连接`);
+                if (disconnected > 0) parts.push(`${disconnected} 已断开`);
+                if (unpaired > 0) parts.push(`${unpaired} 未配对`);
+                return `共 ${data.pairings.length} 个配对：${parts.join(" · ")}`;
+              })()}
+            </p>
+
             {/* 两个配对槽位：各自状态 + 各自表单 */}
             {data.pairings.map((pairing) => (
               <PairingSection key={pairing.slot} pairing={pairing} />

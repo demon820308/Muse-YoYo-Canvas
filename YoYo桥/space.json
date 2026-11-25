@@ -5,7 +5,7 @@
     "yoyo-bridge-fast"
   ],
   "name": "YoYo桥",
-  "platformVersion": 29,
+  "platformVersion": 31,
   "runtime": "typescript",
   "slug": "yoyo-bridge"
 }

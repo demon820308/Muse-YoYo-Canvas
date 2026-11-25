@@ -103,6 +103,33 @@ export function maskBridgeToken(token: string | null | undefined): string {
 }
 
 // ---------------------------------------------------------------------------
+// Connection state (single source of truth, computed at response time)
+// ---------------------------------------------------------------------------
+
+/** A paired slot counts as connected while its last successful sync
+ * is within this window. Sync rounds run every 5 seconds, so 30s
+ * tolerates roughly six missed rounds before a slot reads as
+ * disconnected — a single flaky round never flickers the badge. */
+export const CONNECTION_ONLINE_WINDOW_MS = 30_000;
+
+export type PairingConnection = "unpaired" | "connected" | "disconnected";
+
+/** Pure connection判定 for one slot at moment `now` (ms epoch):
+ * no base URL or no token → unpaired; paired but never online, or
+ * last online older than the window → disconnected; paired and
+ * last online within the window (boundary inclusive) → connected. */
+export function pairingConnection(
+  config: Pick<BridgeConfigRow, "baseUrl" | "token" | "lastOnlineAt">,
+  now: number,
+): PairingConnection {
+  if (!config.baseUrl || !config.token) return "unpaired";
+  if (config.lastOnlineAt == null) return "disconnected";
+  return now - config.lastOnlineAt <= CONNECTION_ONLINE_WINDOW_MS
+    ? "connected"
+    : "disconnected";
+}
+
+// ---------------------------------------------------------------------------
 // Job ledger
 // ---------------------------------------------------------------------------
 
