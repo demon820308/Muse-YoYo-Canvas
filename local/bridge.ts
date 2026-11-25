@@ -337,10 +337,14 @@ async function handleResult(req: Request, deps: Deps, db: Db): Promise<Response>
   const project = await getProjectRow(db, node.projectId);
   if (!project) return json({ error: "project_not_found" }, 404);
   const rawName = req.headers.get("x-file-name") ?? `bridge-${jobId}.bin`;
-  const fileName = basename(decodeURIComponent(rawName));
-  if (!MEDIA_EXTS.has(extname(fileName).toLowerCase())) {
+  const rawFileName = basename(decodeURIComponent(rawName));
+  if (!MEDIA_EXTS.has(extname(rawFileName).toLowerCase())) {
     return json({ error: "unsupported_media_extension" }, 400);
   }
+  const nodeTag = (job.nodeId ?? jobId).slice(0, 8);
+  const fileName = rawFileName.startsWith(`${nodeTag}-`)
+    ? rawFileName
+    : `${nodeTag}-${jobId.slice(0, 8)}-${rawFileName}`;
   const dir = resolve(project.workspaceDir);
   await mkdir(dir, { recursive: true });
   const tmpPath = resolve(dir, `.bridge-${jobId}.part`);

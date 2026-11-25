@@ -1,11 +1,21 @@
 import { useCallback, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { useMutation, type QueryClient } from "@tanstack/react-query";
-import { api } from "../api";
+import { api, type ApiResponse } from "../api";
 import type { ProjectDialogState } from "../components/AppDialogs";
 import { releasePlaybackBlobs } from "../playback-blob";
 import type { CanvasEdge, CanvasNode, ConnectingState } from "../types";
 import type { ContextMenuState, CreateMenuState } from "./use-canvas-gestures";
 import type { PendingConnectState } from "./use-connection-wiring";
+
+export function pickNextProjectId(
+  projects: ReadonlyArray<{ id: string }>,
+  deletedId: string,
+): string | null {
+  const idx = projects.findIndex((p) => p.id === deletedId);
+  const remaining = projects.filter((p) => p.id !== deletedId);
+  if (remaining.length === 0) return null;
+  return remaining[idx === -1 ? 0 : Math.min(idx, remaining.length - 1)]!.id;
+}
 
 export function useProjectActions(opts: {
   projectId: string | null;
@@ -190,9 +200,18 @@ export function useProjectActions(opts: {
   const deleteProject = useMutation({
     mutationFn: (id: string) => api.deleteProject({ id }),
     onSuccess: (_res, id) => {
+      const cached = queryClient.getQueryData<ApiResponse<typeof api, "listProjects">>(["projects"]);
+      const nextId = cached ? pickNextProjectId(cached.projects, id) : null;
+      if (cached) {
+        queryClient.setQueryData<ApiResponse<typeof api, "listProjects">>(["projects"], {
+          ...cached,
+          projects: cached.projects.filter((p) => p.id !== id),
+        });
+      }
+      queryClient.removeQueries({ queryKey: ["project", id], exact: true });
       queryClient.invalidateQueries({ queryKey: ["projects"] });
       setDialog(null);
-      if (id === projectId) switchProject(null);
+      if (id === projectIdRef.current) switchProject(nextId);
       showToast("项目已删除");
     },
   });

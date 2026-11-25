@@ -157,7 +157,12 @@ export async function mirrorNodeMedia(
   force = false,
 ): Promise<boolean> {
   if (!node.mediaBlobKey || (!force && node.filePath)) return false;
-  if (node.type !== "image" && node.type !== "video" && node.type !== "audio") {
+  if (
+    node.type !== "image" &&
+    node.type !== "image-mask" &&
+    node.type !== "video" &&
+    node.type !== "audio"
+  ) {
     return false;
   }
   const project = await getProjectRow(db, node.projectId);
@@ -253,7 +258,10 @@ export async function mirrorPendingMedia(
     (r) =>
       r.mediaBlobKey &&
       !r.filePath &&
-      (r.type === "image" || r.type === "video" || r.type === "audio"),
+      (r.type === "image" ||
+        r.type === "image-mask" ||
+        r.type === "video" ||
+        r.type === "audio"),
   );
   let mirrored = 0;
   for (const row of candidates) {

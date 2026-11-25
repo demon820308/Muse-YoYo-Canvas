@@ -5,7 +5,9 @@ import {
   getMaskEditModeMeta,
   MASK_COLORS,
   MASK_EDIT_MODES,
+  normalizeMaskNodeStyle,
   parseMaskNodeStateJson,
+  resolveEffectiveMaskMode,
   type MaskColorKey,
   type MaskEditMode,
   type MaskNodeStyleState,
@@ -19,7 +21,9 @@ export {
   getMaskEditModeMeta,
   MASK_COLORS,
   MASK_EDIT_MODES,
+  normalizeMaskNodeStyle,
   parseMaskNodeStateJson,
+  resolveEffectiveMaskMode,
   type MaskColorKey,
   type MaskEditMode,
   type MaskNodeStyleState,
@@ -94,7 +98,9 @@ export function fillAlphaHoles(
 
 const maskModeKey = (nodeId: string) => `yoyo:node-mask-mode:v1:${nodeId}`;
 
-export function readNodeMaskMode(nodeId: string): MaskEditMode {
+/** Returns the mode the user explicitly selected for this node, or `null`
+ * if none was saved yet (so callers can infer the best mode from inputs). */
+export function readExplicitNodeMaskMode(nodeId: string): MaskEditMode | null {
   try {
     const raw = window.localStorage.getItem(maskModeKey(nodeId));
     if (MASK_EDIT_MODES.some((m) => m.mode === raw)) {
@@ -103,7 +109,7 @@ export function readNodeMaskMode(nodeId: string): MaskEditMode {
   } catch {
     // ignore storage failures
   }
-  return "remove";
+  return null;
 }
 
 export function writeNodeMaskMode(nodeId: string, mode: MaskEditMode) {
@@ -119,14 +125,16 @@ export type ClassifiedMaskInputs = {
   autoBaseNode: CanvasNode | null;
   directBaseRef: ReferenceInfo | null;
   extraImageRefs: ReferenceInfo[];
+  /** Extra reference images wired into `image-mask` directly (not via a direct edge on the gen node). */
+  upstreamExtraRefs: ReferenceInfo[];
 };
 
-/** Inspects connected references of a generation node and locates any connected
- * `image-mask` tool node, its upstream original image, and extra style/face refs. */
-export function classifyMaskInputs(
+/** Shared classification given the generation node's direct `references` and
+ * the `image-mask` node's upstream input nodes (from either `edges` or `inputsByNodeId`). */
+export function classifyMaskFromUpstreams(
   references: readonly ReferenceInfo[],
-  allNodes: readonly CanvasNode[],
-  edges: readonly CanvasEdge[],
+  maskUpstreams: readonly CanvasNode[],
+  edgeIdByFromNodeId?: ReadonlyMap<string, string>,
 ): ClassifiedMaskInputs {
   const maskRef = references.find((r) => r.node.type === "image-mask") ?? null;
   if (!maskRef) {
@@ -135,31 +143,87 @@ export function classifyMaskInputs(
       autoBaseNode: null,
       directBaseRef: null,
       extraImageRefs: [],
+      upstreamExtraRefs: [],
     };
   }
-  const byId = new Map(allNodes.map((n) => [n.id, n]));
-  let upstreamBase: CanvasNode | null = null;
-  for (const e of edges) {
-    if (e.toNodeId !== maskRef.node.id) continue;
-    const src = byId.get(e.fromNodeId);
-    if (src && src.type === "image" && src.mediaUrl) {
-      upstreamBase = src;
-      break;
-    }
-  }
+  const upstreamImages = maskUpstreams.filter(
+    (u) => u.type === "image" && Boolean(u.mediaUrl),
+  );
+  const upstreamBase = upstreamImages[0] ?? null;
   const imageRefs = references.filter((r) => r.node.type === "image");
   const directBaseRef = upstreamBase
-    ? imageRefs.find((r) => r.node.id === upstreamBase!.id) ?? null
+    ? imageRefs.find((r) => r.node.id === upstreamBase.id) ?? null
     : imageRefs[0] ?? null;
   const autoBaseNode = directBaseRef ? null : upstreamBase;
   const baseId = directBaseRef?.node.id ?? autoBaseNode?.id ?? null;
-  const extraImageRefs = imageRefs.filter((r) => r.node.id !== baseId);
+
+  const extraImageRefs: ReferenceInfo[] = [];
+  const upstreamExtraRefs: ReferenceInfo[] = [];
+  const seenIds = new Set<string>([
+    maskRef.node.id,
+    ...(baseId ? [baseId] : []),
+  ]);
+  const directIdSet = new Set(imageRefs.map((r) => r.node.id));
+  for (const u of upstreamImages.slice(1)) {
+    if (seenIds.has(u.id)) continue;
+    seenIds.add(u.id);
+    const ref: ReferenceInfo = directIdSet.has(u.id)
+      ? imageRefs.find((r) => r.node.id === u.id)!
+      : { edgeId: edgeIdByFromNodeId?.get(u.id) ?? "", node: u };
+    extraImageRefs.push(ref);
+    if (!directIdSet.has(u.id)) upstreamExtraRefs.push(ref);
+  }
+  for (const ref of imageRefs) {
+    if (seenIds.has(ref.node.id)) continue;
+    seenIds.add(ref.node.id);
+    extraImageRefs.push(ref);
+  }
   return {
     maskRef,
     autoBaseNode,
     directBaseRef,
     extraImageRefs,
+    upstreamExtraRefs,
   };
+}
+
+/** Inspects connected references of a generation node and locates any connected
+ * `image-mask` tool node, its upstream original image, and extra style/face refs
+ * connected either to the `image-mask` node or directly to the generation node. */
+export function classifyMaskInputs(
+  references: readonly ReferenceInfo[],
+  allNodes: readonly CanvasNode[],
+  edges: readonly CanvasEdge[],
+): ClassifiedMaskInputs {
+  const maskRef = references.find((r) => r.node.type === "image-mask") ?? null;
+  if (!maskRef) {
+    return classifyMaskFromUpstreams(references, []);
+  }
+  const byId = new Map(allNodes.map((n) => [n.id, n]));
+  const upstreams: CanvasNode[] = [];
+  const edgeIdByFromNodeId = new Map<string, string>();
+  const seen = new Set<string>();
+  const pushNode = (node: CanvasNode, edgeId: string) => {
+    if (seen.has(node.id)) return;
+    seen.add(node.id);
+    upstreams.push(node);
+    edgeIdByFromNodeId.set(node.id, edgeId);
+  };
+  for (const e of edges) {
+    if (e.toNodeId !== maskRef.node.id) continue;
+    const src = byId.get(e.fromNodeId);
+    if (!src) continue;
+    if (src.type === "group") {
+      for (const m of allNodes) {
+        if (m.groupId === src.id && m.type !== "group") {
+          pushNode(m, e.id);
+        }
+      }
+    } else {
+      pushNode(src, e.id);
+    }
+  }
+  return classifyMaskFromUpstreams(references, upstreams, edgeIdByFromNodeId);
 }
 
 export function parseGenSize(

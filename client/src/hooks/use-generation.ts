@@ -25,7 +25,7 @@ import { fileToBase64 } from "@hatch/space-sdk/client";
 import { api, type ApiRequest } from "../api";
 import { buildInputsByNodeId } from "../canvas-derived";
 import { frameMatchesGenSizeAspect } from "../canvas-geometry";
-import { readNodeMaskMode } from "../components/mask-helpers";
+import { readExplicitNodeMaskMode } from "../components/mask-helpers";
 import { type NodeRunFeedback } from "../components/run-feedback";
 import {
   VIDEO_SECONDS_DEFAULT,
@@ -290,7 +290,9 @@ const runGeneration = useCallback(
         buildInputsByNodeId(nodesRef.current, edgesRef.current).get(node.id) ?? [];
       const hasMaskInput = nodeInputs.some((n) => n.type === "image-mask");
       const maskMode =
-        hasMaskInput && isImageGen ? readNodeMaskMode(node.id) : undefined;
+        hasMaskInput && isImageGen
+          ? (readExplicitNodeMaskMode(node.id) ?? undefined)
+          : undefined;
       const res =
         node.type === "config"
           ? await api.runConfigNode({

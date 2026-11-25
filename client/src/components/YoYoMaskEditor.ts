@@ -1,6 +1,10 @@
 // Direct mask editor for YoYoCanvas, adapted from Goohai's mask editor UI/engine.
 
-import type { MaskColorKey, MaskNodeStyleState } from "./mask-helpers";
+import {
+  normalizeMaskNodeStyle,
+  type MaskColorKey,
+  type MaskNodeStyleState,
+} from "./mask-helpers";
 
 export type YoYoMaskSaveResult = {
   maskDataUrl: string;
@@ -251,13 +255,15 @@ export class YoYoMaskEditor {
     onClose: () => void;
   }) {
     injectYoYoMaskStyles();
+    const initialStyle = normalizeMaskNodeStyle(opts.outputState);
     this.imageUrl = opts.imageUrl;
     this.strokesUrl = opts.strokesUrl ?? null;
-    this.outputMode = opts.outputState?.outputMode === "original" ? "original" : "color";
-    this.outputColor = opts.outputState?.colorKey || "red";
-    this.outputOpacity = clamp(Number(opts.outputState?.opacity ?? 50), 0, 100);
-    this.autoFillHoles = Boolean(opts.outputState?.fillHoles);
-    this.maskInverted = Boolean(opts.outputState?.inverted);
+    this.outputMode = initialStyle.outputMode;
+    this.outputColor = initialStyle.colorKey;
+    this.outputOpacity = clamp(initialStyle.opacity, 0, 100);
+    this.autoFillHoles = initialStyle.fillHoles;
+    this.maskInverted = initialStyle.inverted;
+    this.maskBrushColor = initialStyle.brushColor ?? "green";
     this.onSave = opts.onSave;
     this.onClose = opts.onClose;
     this.brushColor = this.outputMode === "color" ? this.outputColor : this.maskBrushColor;
@@ -640,6 +646,9 @@ export class YoYoMaskEditor {
   }
 
   updateOutputControls() {
+    this.root.querySelectorAll<HTMLElement>("[data-color]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.color === this.maskBrushColor);
+    });
     this.root.querySelectorAll<HTMLElement>("[data-output-mode]").forEach((button) => {
       button.classList.toggle("active", button.dataset.outputMode === this.outputMode);
     });

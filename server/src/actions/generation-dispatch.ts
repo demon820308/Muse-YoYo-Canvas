@@ -1,5 +1,7 @@
 // generation-dispatch.ts — 生成分发主路径。
 
+import { existsSync } from "node:fs";
+import { basename } from "node:path";
 import { z, type Ctx } from "@hatch/space-sdk";
 import { eq } from "drizzle-orm";
 import * as schema from "../schema";
@@ -34,6 +36,51 @@ const EMPTY_PROMPT_MESSAGE =
   "提示词为空：节点自身没有提示词，也没有连入任何文本内";
 
 export const INFERENCE_TIMEOUT_SECS = 120;
+
+const SHARED_RESULT_NAME_RE = /^result\.[a-z0-9]+$/i;
+
+// mediaBlobKey 是唯一的媒体权威存储；filePath 只是工作目录镜像。
+// 消费参考图前，若存在未落盘、文件缺失、多节点共用同一路径或历史 result.* 命名，
+// 按节点独立的 mediaBlobKey 统一重建专属磁盘文件。
+async function ensureRefFilesSynced(
+  ctx: Ctx,
+  db: Db,
+  projectId: string,
+  refs: GenResource[],
+): Promise<void> {
+  if (refs.length === 0) return;
+  const projectRows = await db
+    .select({ filePath: schema.canvasNodes.filePath })
+    .from(schema.canvasNodes)
+    .where(eq(schema.canvasNodes.projectId, projectId));
+  const pathCounts = new Map<string, number>();
+  for (const row of projectRows) {
+    if (!row.filePath) continue;
+    const norm = expandHome(row.filePath);
+    pathCounts.set(norm, (pathCounts.get(norm) ?? 0) + 1);
+  }
+  for (const r of refs) {
+    const expanded = r.filePath ? expandHome(r.filePath) : null;
+    const base = expanded ? basename(expanded) : "";
+    const needsSync =
+      !expanded ||
+      !existsSync(expanded) ||
+      (pathCounts.get(expanded) ?? 0) > 1 ||
+      SHARED_RESULT_NAME_RE.test(base);
+    if (!needsSync) continue;
+    const row = await getNodeRow(db, r.nodeId);
+    if (!row?.mediaBlobKey) continue;
+    try {
+      const ok = await mirrorNodeMedia(ctx, db, row, 1, true);
+      if (ok) {
+        const fresh = await getNodeRow(db, row.id);
+        if (fresh?.filePath) r.filePath = fresh.filePath;
+      }
+    } catch {
+      // Best-effort repair; keep existing path when blob read is mocked/unavailable.
+    }
+  }
+}
 
 
 
@@ -174,7 +221,7 @@ async function dispatchLocalImageGeneration(
       await deliverGeneratedFile(
         ctx,
         db,
-        { nodeId: node.id, filePath: produced.filePath, title },
+        { nodeId: node.id, filePath: produced.filePath, title, prompt },
         "image",
       );
     } catch (err) {
@@ -230,6 +277,7 @@ export async function dispatchImageGeneration(
     await markFailed(db, node.id, EMPTY_PROMPT_MESSAGE);
     return { status: "failed", error: EMPTY_PROMPT_MESSAGE };
   }
+  await ensureRefFilesSynced(ctx, db, node.projectId, context.imageRefs);
   const agyReady = Boolean(ctx.localAgy && (await ctx.localAgy.isReady()));
   const gwebReady = Boolean(
     ctx.localGeminiWeb && (await ctx.localGeminiWeb.isReady()),
@@ -385,6 +433,7 @@ export async function dispatchVideoGeneration(
   }
   const project = await getProjectRow(db, node.projectId);
   const allImageRefs = [...(override?.extraImageRefs ?? []), ...context.imageRefs];
+  await ensureRefFilesSynced(ctx, db, node.projectId, allImageRefs);
   const usableRefs = allImageRefs.filter((r) => r.filePath);
   const missingCount = allImageRefs.length - usableRefs.length;
   const refLines = usableRefs

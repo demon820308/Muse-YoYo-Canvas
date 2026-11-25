@@ -309,6 +309,7 @@ export function useToolbarActions(opts: {
             ? `已替换「${node.title}」并落盘到项目目录`
             : `已替换「${node.title}」（落盘未成功，稍后会再试）`,
         );
+        void queryClient.invalidateQueries({ queryKey: ["assets"] });
         void refreshGraphFromServer();
       } catch {
         showToast("替换失败，请稍后重试");

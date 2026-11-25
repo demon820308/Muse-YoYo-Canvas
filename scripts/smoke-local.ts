@@ -198,8 +198,11 @@ await action("addAsset", {
 });
 const assets = await action<any>("listAssets", { projectId: pid });
 check(
-  "资产库写入可读（上传不自动登记，与源版 uploadMedia 口径一致）",
-  assets.assets.some((a: any) => a.title === "冒烟资产") && assets.assets.length === 1,
+  "资产库写入可读且画布直传的图片/视频自动入资产",
+  assets.assets.some((a: any) => a.title === "冒烟资产" && a.kind === "text") &&
+    assets.assets.some((a: any) => a.title === "fixture.png" && a.kind === "image") &&
+    assets.assets.some((a: any) => a.title === "fixture.mp4" && a.kind === "video") &&
+    assets.assets.length === 3,
   `assets=${assets.assets.length}`,
 );
 

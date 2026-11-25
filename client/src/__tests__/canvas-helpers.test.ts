@@ -17,6 +17,7 @@ import {
   computeSelectionBoxRect,
 } from "../canvas-derived";
 import type { CanvasEdge, CanvasNode } from "../types";
+import { pickNextProjectId } from "../hooks/use-project-actions";
 
 describe("gesture-math", () => {
   test("滚轮缩放保持鼠标下世界坐标不动且受上下限钳制", () => {
@@ -137,5 +138,14 @@ describe("app-helpers", () => {
       narrowMaxHeight: "min(62dvh, 560px)",
     });
     expect(style?.top).toBe(160);
+  });
+
+  test("pickNextProjectId 删除后选中下一个项目或回退到相邻/空", () => {
+    const list = [{ id: "p1" }, { id: "p2" }, { id: "p3" }];
+    expect(pickNextProjectId(list, "p1")).toBe("p2");
+    expect(pickNextProjectId(list, "p2")).toBe("p3");
+    expect(pickNextProjectId(list, "p3")).toBe("p2");
+    expect(pickNextProjectId([{ id: "p1" }], "p1")).toBeNull();
+    expect(pickNextProjectId(list, "missing")).toBe("p1");
   });
 });

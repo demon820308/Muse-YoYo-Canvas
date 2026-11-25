@@ -78,7 +78,7 @@ describe("resolveMaskGenerationContext", () => {
     expect(resolved.maskError).toContain("尚未绘制蒙版");
   });
 
-  test("原图->蒙版->生图（+参考图）自动溯源原图并按 [原图, 蒙版, 参考图] 排序封装提示词", async () => {
+  test("原图->蒙版->生图（+参考图）不重复附带原图并按 [蒙版, 参考图] 排序封装提示词", async () => {
     const db = await makeDb();
     const now = new Date();
     await db.insert(schema.projects).values({
@@ -142,15 +142,104 @@ describe("resolveMaskGenerationContext", () => {
 
     expect(resolved.maskError).toBeNull();
     expect(resolved.context.imageRefs.map((r) => r.nodeId)).toEqual([
-      "img-base",
       "mask-1",
       "img-outfit",
     ]);
-    expect(resolved.context.prompt).toContain("图1为原始底图");
-    expect(resolved.context.prompt).toContain("半透明红色高亮");
-    expect(resolved.context.prompt).toContain("图3中的服装/配饰款式");
+    expect(resolved.context.prompt).not.toContain("图1为原始底图");
+    expect(resolved.context.prompt).toContain("图1是用半透明红色高亮标出需要修改区域的底图");
+    expect(resolved.context.prompt).toContain("仅提取并迁移图2中的服装/配饰款式");
 
     const removeResolved = await resolveMaskGenerationContext(db, genRow!, rawCtx, "remove");
-    expect(removeResolved.context.prompt).toContain("完全移除");
+    expect(removeResolved.context.prompt).toContain("彻底移除");
+
+    // 换脸模式与 @ 引用编号重映射校验
+    const faceChipCtx = await buildGenerationContext(db, genRow!, "把脸换成 @[node:img-outfit]");
+    const faceResolved = await resolveMaskGenerationContext(
+      db,
+      { ...genRow!, prompt: "把脸换成 @[node:img-outfit]" },
+      faceChipCtx,
+      "face",
+    );
+    expect(faceResolved.context.prompt).toContain("替换为图2中人物的五官长相");
+    expect(faceResolved.context.prompt).toContain("把脸换成 图2");
+    expect(faceResolved.context.prompt).not.toContain("图片1");
+  });
+
+  test("[原图, 参考图]->蒙版->生图（参考图连在蒙版上且未手选模式/未写词）不带原图、保留蒙版与参考图并自动走参考替换而非移除", async () => {
+    const db = await makeDb();
+    const now = new Date();
+    await db.insert(schema.projects).values({
+      id: "p2",
+      name: "mask-upstream-ref",
+      workspaceDir: "/tmp/p2",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(schema.canvasNodes).values([
+      {
+        id: "img-base",
+        projectId: "p2",
+        type: "image",
+        title: "原图",
+        mediaBlobKey: "media/p2/img-base",
+        filePath: "/tmp/p2/base.png",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "img-face",
+        projectId: "p2",
+        type: "image",
+        title: "参考脸",
+        mediaBlobKey: "media/p2/img-face",
+        filePath: "/tmp/p2/face.png",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "mask-1",
+        projectId: "p2",
+        type: "image-mask",
+        title: "绘制蒙版",
+        prompt: JSON.stringify({ outputMode: "original", brushColor: "green" }),
+        mediaBlobKey: "media/p2/mask-1",
+        filePath: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "gen-node",
+        projectId: "p2",
+        type: "image",
+        title: "生图",
+        prompt: "",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+    await db.insert(schema.canvasEdges).values([
+      { id: "e1", projectId: "p2", fromNodeId: "img-base", toNodeId: "mask-1", sortOrder: 0 },
+      { id: "e2", projectId: "p2", fromNodeId: "img-face", toNodeId: "mask-1", sortOrder: 1 },
+      { id: "e3", projectId: "p2", fromNodeId: "mask-1", toNodeId: "gen-node", sortOrder: 0 },
+    ]);
+
+    const [genRow] = await db.select().from(schema.canvasNodes).where((await import("drizzle-orm")).eq(schema.canvasNodes.id, "gen-node"));
+    const rawCtx = await buildGenerationContext(db, genRow!, "");
+    const resolved = await resolveMaskGenerationContext(db, genRow!, rawCtx, undefined);
+
+    expect(resolved.maskError).toBeNull();
+    expect(resolved.context.imageRefs.map((r) => r.nodeId)).toEqual([
+      "mask-1",
+      "img-face",
+    ]);
+    expect(resolved.context.prompt).toContain("图2为目标参考图");
+    expect(resolved.context.prompt).toContain("自然替换并融合为图2中对应主体/部位的外观与特征");
+    expect(resolved.context.prompt).not.toContain("彻底移除");
+
+    // 无参考图且无提示词、未指定模式时，默认走移除模式
+    await db.delete(schema.canvasEdges).where((await import("drizzle-orm")).eq(schema.canvasEdges.id, "e2"));
+    const plainCtx = await buildGenerationContext(db, genRow!, "");
+    const plainResolved = await resolveMaskGenerationContext(db, genRow!, plainCtx, undefined);
+    expect(plainResolved.context.prompt).toContain("彻底移除");
   });
 });

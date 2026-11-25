@@ -143,20 +143,7 @@ return { ...place, x: spot.x, y: spot.y };
 export async function attachResultNode(
 db: Db,
 source: NodeRow,
-fields: {
-id?: string;
-type: NodeRow["type"];
-title: string;
-content: string;
-prompt?: string;
-mediaBlobKey: string | null;
-mimeType: string | null;
-filePath: string | null;
-genSize?: string | null;
-/** Measured duration (seconds) for audio results, probed from the file. */
-durationSeconds?: number | null;
-posterBlobKey?: string | null;
-},
+fields: MediaResultFields,
 ): Promise<string> {
 const place = await placeResult(db, source, fields.type, fields.genSize);
 const resultId = fields.id?? crypto.randomUUID();
@@ -247,7 +234,7 @@ mediaBlobKey: fields.mediaBlobKey,
 mimeType: fields.mimeType,
 filePath: fields.filePath,
 genSize: fields.genSize ?? null,
-prompt: fields.prompt,
+prompt: fields.recordPrompt ?? fields.prompt,
 });
 }
 return resultId;
@@ -259,6 +246,8 @@ export type MediaResultFields = {
   title: string;
   content: string;
   prompt?: string;
+  /** Assembled generation prompt recorded into history/assets without overwriting the node's own editable prompt. */
+  recordPrompt?: string;
   mediaBlobKey: string | null;
   mimeType: string | null;
   filePath: string | null;
@@ -473,7 +462,7 @@ export async function landMediaResult(
       mimeType: fields.mimeType,
       filePath: fields.filePath,
       genSize: fields.genSize ?? null,
-      prompt: fields.prompt,
+      prompt: fields.recordPrompt ?? fields.prompt,
     });
   }
   return landedId;

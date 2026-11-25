@@ -39,11 +39,13 @@ import { RatioSelect } from "./RatioSelect";
 import { useAgyStatus, type AgyEngine } from "../hooks/use-agy";
 import { useGeminiWebStatus } from "../hooks/use-gemini-web";
 import {
+  classifyMaskFromUpstreams,
   closestImageRatio,
   getMaskEditModeMeta,
   MASK_EDIT_MODES,
   parseGenSize,
-  readNodeMaskMode,
+  readExplicitNodeMaskMode,
+  resolveEffectiveMaskMode,
   writeNodeMaskMode,
   type MaskEditMode,
 } from "./mask-helpers";
@@ -92,38 +94,42 @@ export function GenerationPanel({
   const geminiWeb = useGeminiWebStatus();
   const isConfig = node.type === "config";
   const mode: GenMode = isConfig ? (node.genMode ?? "image") : node.type === "video" ? "video" : node.type === "audio" ? "audio" : "image";
-  const maskRef =
+  const maskCandidateRef =
     mode === "image"
       ? references.find((r) => r.node.type === "image-mask") ?? null
       : null;
-  const [maskMode, setMaskMode] = useState<MaskEditMode>(() =>
-    readNodeMaskMode(node.id),
+  const [explicitMaskMode, setExplicitMaskMode] = useState<MaskEditMode | null>(
+    () => readExplicitNodeMaskMode(node.id),
   );
   useEffect(() => {
-    setMaskMode(readNodeMaskMode(node.id));
+    setExplicitMaskMode(readExplicitNodeMaskMode(node.id));
   }, [node.id]);
   const selectMaskMode = (next: MaskEditMode) => {
-    setMaskMode(next);
+    setExplicitMaskMode(next);
     writeNodeMaskMode(node.id, next);
   };
-  const maskUpstreams = maskRef ? inputsByNodeId?.get(maskRef.node.id) ?? [] : [];
-  const maskUpstreamBase =
-    maskUpstreams.find((u) => u.type === "image" && Boolean(u.mediaUrl)) ?? null;
-  const imageRefs = references.filter((r) => r.node.type === "image");
-  const directBaseRef = maskRef
-    ? (maskUpstreamBase
-        ? imageRefs.find((r) => r.node.id === maskUpstreamBase.id) ?? null
-        : imageRefs[0] ?? null)
-    : null;
-  const autoBaseNode = maskRef && !directBaseRef ? maskUpstreamBase : null;
-  const baseId = directBaseRef?.node.id ?? autoBaseNode?.id ?? null;
-  const extraMaskRefImages = maskRef
-    ? imageRefs.filter((r) => r.node.id !== baseId)
+  const maskUpstreams = maskCandidateRef
+    ? inputsByNodeId?.get(maskCandidateRef.node.id) ?? []
     : [];
+  const {
+    maskRef,
+    autoBaseNode,
+    directBaseRef,
+    extraImageRefs: extraMaskRefImages,
+    upstreamExtraRefs,
+  } = classifyMaskFromUpstreams(
+    mode === "image" ? references : [],
+    maskUpstreams,
+  );
+  const maskMode = resolveEffectiveMaskMode({
+    explicitMode: explicitMaskMode,
+    hasRefImage: extraMaskRefImages.length > 0,
+    hasUserPrompt: Boolean(node.prompt.trim()),
+  });
   const activeMaskModeMeta = getMaskEditModeMeta(maskMode);
   const maskTargetRatio = (() => {
     if (!maskRef) return null;
-    const srcNode = maskUpstreamBase ?? directBaseRef?.node ?? null;
+    const srcNode = autoBaseNode ?? directBaseRef?.node ?? null;
     if (srcNode) {
       const parsed = parseGenSize(srcNode.genSize);
       if (parsed) return closestImageRatio(parsed.w, parsed.h);
@@ -251,12 +257,10 @@ export function GenerationPanel({
         ? "重新生成"
         : "生成";
   // Config nodes follow the reference gate; when an image-mask is connected,
-  // remove mode permits empty prompts and outfit/face permit ref-only runs.
+  // remove mode or any run with extra reference images permits empty prompts.
   const maskAllowsEmptyPrompt =
     Boolean(maskRef) &&
-    (maskMode === "remove" ||
-      ((maskMode === "outfit" || maskMode === "face") &&
-        extraMaskRefImages.length > 0));
+    (maskMode === "remove" || extraMaskRefImages.length > 0);
   const configCanGenerate =
     maskAllowsEmptyPrompt ||
     !isConfig ||
@@ -351,6 +355,21 @@ export function GenerationPanel({
               </div>
             );
           })}
+          {upstreamExtraRefs.map((ref) => (
+            <div
+              key={`mask-up:${ref.node.id}`}
+              className="relative h-10 w-10 shrink-0 overflow-hidden rounded-xl border border-dashed border-[var(--border)] bg-[var(--surface-3)]"
+              title={`来自蒙版节点的参考图：${ref.node.title}（如需移除请在画布断开它与蒙版节点的连线）`}
+              aria-label={`蒙版参考图 ${ref.node.title}`}
+            >
+              {ref.node.mediaUrl ? (
+                <img src={ref.node.mediaUrl} alt={ref.node.title} className="h-full w-full object-cover" />
+              ) : null}
+              <span className="pointer-events-none absolute bottom-0 left-0 right-0 bg-black/70 px-0.5 text-center text-[9px] leading-3 text-white">
+                参考
+              </span>
+            </div>
+          ))}
           <div className="relative shrink-0">
             <button
               type="button"

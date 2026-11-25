@@ -6,7 +6,7 @@ import { Contracts } from "@space/privileged";
 import { eq, inArray } from "drizzle-orm";
 import * as schema from "../schema";
 import { nodeShape, toNode } from "./contracts";
-import { getNodeRow, getProjectRow } from "./graph-helpers";
+import { getNodeRow, getProjectRow, recordMediaAsset } from "./graph-helpers";
 import { reserveNodeSeqs, projectDirBase, expandHome, extForMime } from "./project-dirs";
 import { ensurePoster, ensureProxy } from "./queue-sweep";
 import { attachProducedFile, imageSourceFile, videoSourceFile } from "./tool-dispatch";
@@ -360,6 +360,10 @@ export const MediaEditActions = {
       }
       const finalRow = await getNodeRow(db, node.id);
       if (!finalRow) throw new Error("replaceNodeMedia: node vanished");
+      await recordMediaAsset(db, finalRow, {
+        title: finalRow.title || args.fileName || "未命名素材",
+        prompt: finalRow.prompt || "",
+      });
       ctx.invalidateQueries();
       return { node: await toNode(ctx, finalRow), filePath };
     },
@@ -473,6 +477,10 @@ export const MediaEditActions = {
         }
       }
       const finalRow = (await getNodeRow(db, nodeId)) ?? row;
+      await recordMediaAsset(db, finalRow, {
+        title: finalRow.title || args.fileName || "未命名素材",
+        prompt: "",
+      });
       ctx.invalidateQueries();
       return { node: await toNode(ctx, finalRow), filePath };
     },

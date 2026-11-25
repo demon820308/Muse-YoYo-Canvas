@@ -9,6 +9,7 @@ import {
   buildMaskEditPrompt,
   getMaskColor,
   parseMaskNodeStateJson,
+  resolveEffectiveMaskMode,
   type MaskEditMode,
 } from "./mask-prompt";
 
@@ -184,8 +185,11 @@ export async function buildGenerationContext(
   return { prompt, refs, imageRefs: selected.filter((r) => r.type === "image") };
 }
 
-/** Resolves upstream base images and wraps the prompt when an `image-mask`
- * node is connected into an image-generation node. */
+/** Resolves upstream reference images (connected to either the `image-mask` node
+ * or the generation node) and wraps the prompt when an `image-mask` node is
+ * connected into an image-generation node. The mask node's own image already
+ * carries the base picture with translucent mask strokes, so the upstream base
+ * image is excluded to avoid confusing the model with two near-identical images. */
 export async function resolveMaskGenerationContext(
   db: Db,
   node: NodeRow,
@@ -195,35 +199,70 @@ export async function resolveMaskGenerationContext(
   const inputs = await collectInputs(db, node);
   const maskRow = inputs.find((r) => r.type === "image-mask");
   if (!maskRow) return { context, maskError: null };
-  if (!maskRow.mediaBlobKey || !maskRow.filePath) {
+  if (!maskRow.mediaBlobKey) {
     return {
       context,
       maskError: "连入的蒙版节点尚未绘制蒙版，请先在蒙版节点上点击「绘制蒙版」",
     };
   }
   const maskInputs = await collectInputs(db, maskRow);
-  const upstreamBaseRow = maskInputs.find(
+  const upstreamImages = maskInputs.filter(
     (u) => u.type === "image" && Boolean(u.mediaBlobKey),
   );
+  const upstreamBaseRow = upstreamImages[0];
+  const upstreamExtraRows = upstreamImages.slice(1);
   const maskRes =
     context.imageRefs.find((r) => r.nodeId === maskRow.id) ??
     toResource(maskRow);
-  let baseRes: GenResource | null = upstreamBaseRow
-    ? context.imageRefs.find((r) => r.nodeId === upstreamBaseRow.id) ??
-      toResource(upstreamBaseRow)
-    : null;
-  if (!baseRes) {
-    baseRes =
-      context.imageRefs.find((r) => r.nodeId !== maskRow.id && !r.isMask) ?? null;
+  const extraImageRefs: GenResource[] = [];
+  const seenImageIds = new Set<string>([
+    maskRow.id,
+    ...(upstreamBaseRow ? [upstreamBaseRow.id] : []),
+  ]);
+  const pushExtraImage = (res: GenResource | null) => {
+    if (!res || res.type !== "image" || seenImageIds.has(res.nodeId)) return;
+    seenImageIds.add(res.nodeId);
+    extraImageRefs.push(res);
+  };
+  for (const row of upstreamExtraRows) {
+    pushExtraImage(
+      context.imageRefs.find((r) => r.nodeId === row.id) ?? toResource(row),
+    );
   }
-  const extraImageRefs = context.imageRefs.filter(
-    (r) => r.nodeId !== maskRow.id && r.nodeId !== baseRes?.nodeId,
+  for (const ref of context.imageRefs) {
+    pushExtraImage(ref);
+  }
+  const seenTextIds = new Set(
+    context.refs.filter((r) => r.type === "text").map((r) => r.nodeId),
   );
+  const upstreamTextResources = maskInputs
+    .map(toResource)
+    .filter(
+      (r): r is GenResource =>
+        r !== null && r.type === "text" && !seenTextIds.has(r.nodeId),
+    );
+  const effectiveUserPrompt = [
+    context.prompt.trim(),
+    ...upstreamTextResources.map((r) => r.text),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
   const orderedImageRefs = [
-    ...(baseRes ? [baseRes] : []),
     ...(maskRes ? [maskRes] : []),
     ...extraImageRefs,
   ];
+  let remappedPrompt = effectiveUserPrompt;
+  if (/@\[node:[^\]]+\]/.test((node.prompt || node.content).trim())) {
+    context.imageRefs.forEach((ref, idx) => {
+      const finalIdx = orderedImageRefs.findIndex((r) => r.nodeId === ref.nodeId);
+      if (finalIdx >= 0) {
+        remappedPrompt = remappedPrompt.replace(
+          new RegExp(`图片${idx + 1}(?!\\d)`, "g"),
+          `图${finalIdx + 1}`,
+        );
+      }
+    });
+  }
   const style = parseMaskNodeStateJson(maskRow.prompt);
   const colorLabel =
     style.outputMode === "original"
@@ -233,14 +272,24 @@ export async function resolveMaskGenerationContext(
           ? "黑色"
           : "绿色"
       : getMaskColor(style.colorKey).label;
-  const wrappedPrompt = buildMaskEditPrompt({
-    mode: maskMode ?? "custom",
-    colorLabel,
-    userPrompt: context.prompt,
+  const effectiveMode = resolveEffectiveMaskMode({
+    explicitMode: maskMode,
     hasRefImage: extraImageRefs.length > 0,
-    hasSeparateBaseImage: Boolean(baseRes),
+    hasUserPrompt: Boolean(remappedPrompt),
   });
-  const nonImageRefs = context.refs.filter((r) => r.type !== "image");
+  const wrappedPrompt = buildMaskEditPrompt({
+    mode: effectiveMode,
+    colorLabel,
+    userPrompt: remappedPrompt,
+    hasRefImage: extraImageRefs.length > 0,
+    refCount: extraImageRefs.length,
+    hasSeparateBaseImage: false,
+    opacity: style.outputMode === "color" ? style.opacity : 50,
+  });
+  const nonImageRefs = [
+    ...context.refs.filter((r) => r.type !== "image"),
+    ...upstreamTextResources,
+  ];
   return {
     context: {
       prompt: wrappedPrompt,

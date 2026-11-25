@@ -3,9 +3,13 @@ import {
   buildMaskEditPrompt,
   classifyMaskInputs,
   closestImageRatio,
+  DEFAULT_MASK_NODE_STYLE,
   fillAlphaHoles,
+  getMaskColor,
   maskCardSizeForSource,
+  normalizeMaskNodeStyle,
   parseMaskNodeStateJson,
+  resolveEffectiveMaskMode,
   resolveMaskSourceRatio,
 } from "../components/mask-helpers";
 import type { CanvasEdge, CanvasNode, ReferenceInfo } from "../types";
@@ -70,7 +74,8 @@ describe("mask-helpers", () => {
     });
     expect(removeAuto).toContain("图1为原始底图");
     expect(removeAuto).toContain("半透明红色高亮标出了需要修改的区域");
-    expect(removeAuto).toContain("完全移除");
+    expect(removeAuto).toContain("彻底移除");
+    expect(removeAuto).toContain("不要凭空生成无关新物体");
 
     const outfitWithRef = buildMaskEditPrompt({
       mode: "outfit",
@@ -79,9 +84,31 @@ describe("mask-helpers", () => {
       hasRefImage: true,
       hasSeparateBaseImage: true,
     });
-    expect(outfitWithRef).toContain("图3为目标样式/人物参考图");
-    expect(outfitWithRef).toContain("替换为图3中的服装/配饰款式");
+    expect(outfitWithRef).toContain("图3为目标参考图");
+    expect(outfitWithRef).toContain("仅提取并迁移图3中的服装/配饰款式");
+    expect(outfitWithRef).toContain("严禁改变或替换为图3的人物长相与身材");
     expect(outfitWithRef).toContain("注意领口自然");
+
+    const faceWithRef = buildMaskEditPrompt({
+      mode: "face",
+      colorLabel: "绿色",
+      userPrompt: "",
+      hasRefImage: true,
+      hasSeparateBaseImage: true,
+    });
+    expect(faceWithRef).toContain("替换为图3中人物的五官长相、眉眼鼻唇结构与身份特征");
+    expect(faceWithRef).toContain("发际线/颈部肤色边缘过渡");
+
+    const multiRefCustom = buildMaskEditPrompt({
+      mode: "custom",
+      colorLabel: "绿色",
+      userPrompt: "把帽子戴上",
+      hasRefImage: true,
+      refCount: 2,
+      hasSeparateBaseImage: true,
+    });
+    expect(multiRefCustom).toContain("图3～图4为目标参考图");
+    expect(multiRefCustom).toContain("结合图3～图4的视觉特征");
   });
 
   test("classifyMaskInputs resolves auto upstream base image and extra ref images", () => {
@@ -121,6 +148,47 @@ describe("mask-helpers", () => {
       edges,
     );
     expect(withoutMask.maskRef).toBeNull();
+
+    // Extra reference wired directly into the mask node (plus deduplication if wired to both)
+    const upstreamRefEdges: CanvasEdge[] = [
+      { id: "e1", projectId: "p1", fromNodeId: "img-base", toNodeId: "mask-1" },
+      { id: "e4", projectId: "p1", fromNodeId: "img-outfit", toNodeId: "mask-1" },
+      { id: "e2", projectId: "p1", fromNodeId: "mask-1", toNodeId: "gen-1" },
+    ];
+    const fromMaskOnly = classifyMaskInputs(
+      [{ edgeId: "e2", node: maskNode }],
+      [baseNode, maskNode, outfitNode],
+      upstreamRefEdges,
+    );
+    expect(fromMaskOnly.autoBaseNode?.id).toBe("img-base");
+    expect(fromMaskOnly.extraImageRefs.map((r) => r.node.id)).toEqual(["img-outfit"]);
+    expect(fromMaskOnly.upstreamExtraRefs.map((r) => r.node.id)).toEqual(["img-outfit"]);
+
+    const dedupBoth = classifyMaskInputs(
+      [
+        { edgeId: "e2", node: maskNode },
+        { edgeId: "e3", node: outfitNode },
+      ],
+      [baseNode, maskNode, outfitNode],
+      upstreamRefEdges,
+    );
+    expect(dedupBoth.extraImageRefs.map((r) => r.node.id)).toEqual(["img-outfit"]);
+    expect(dedupBoth.upstreamExtraRefs).toEqual([]);
+  });
+
+  test("resolveEffectiveMaskMode infers custom when ref image or prompt exists without explicit mode", () => {
+    expect(
+      resolveEffectiveMaskMode({ explicitMode: null, hasRefImage: true, hasUserPrompt: false }),
+    ).toBe("custom");
+    expect(
+      resolveEffectiveMaskMode({ explicitMode: null, hasRefImage: false, hasUserPrompt: true }),
+    ).toBe("custom");
+    expect(
+      resolveEffectiveMaskMode({ explicitMode: null, hasRefImage: false, hasUserPrompt: false }),
+    ).toBe("remove");
+    expect(
+      resolveEffectiveMaskMode({ explicitMode: "remove", hasRefImage: true, hasUserPrompt: true }),
+    ).toBe("remove");
   });
 
   test("resolveMaskSourceRatio prefers original image probed genSize over upload 1:1 default", () => {
@@ -167,5 +235,23 @@ describe("mask-helpers", () => {
       height: 190,
     });
     expect(fallbackRatio).toEqual({ width: 360, height: 404 });
+  });
+
+  test("normalizeMaskNodeStyle and getMaskColor share consistent defaults and restore brushColor", () => {
+    expect(normalizeMaskNodeStyle(null)).toEqual(DEFAULT_MASK_NODE_STYLE);
+    expect(normalizeMaskNodeStyle({ brushColor: "white" }).brushColor).toBe("white");
+    expect(normalizeMaskNodeStyle({ brushColor: "black" }).outputMode).toBe("original");
+    expect(getMaskColor("unknown" as never).key).toBe(DEFAULT_MASK_NODE_STYLE.colorKey);
+
+    const opaquePrompt = buildMaskEditPrompt({
+      mode: "remove",
+      colorLabel: "红色",
+      userPrompt: "",
+      hasRefImage: false,
+      hasSeparateBaseImage: false,
+      opacity: 100,
+    });
+    expect(opaquePrompt).toContain("用红色高亮标出");
+    expect(opaquePrompt).not.toContain("半透明");
   });
 });

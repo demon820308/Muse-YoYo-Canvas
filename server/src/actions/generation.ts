@@ -641,7 +641,7 @@ export const GenerationActions = {
 export async function deliverGeneratedFile(
   ctx: Ctx,
   db: Db,
-  args: { nodeId: string; filePath: string; title?: string },
+  args: { nodeId: string; filePath: string; title?: string; prompt?: string },
   kind: "image" | "video" | "audio",
 ): Promise<z.infer<typeof completeResult>> {
   const node = await getNodeRow(db, args.nodeId);
@@ -724,7 +724,8 @@ export async function deliverGeneratedFile(
     const resultTitle =
       args.title ??
       (node.title ? `${node.title} · ${defaultTitle}` : defaultTitle);
-    const resultPrompt = (node.prompt || node.content).trim();
+    const nodeOwnPromptText = (node.prompt || node.content).trim();
+    const recordPrompt = args.prompt?.trim() || nodeOwnPromptText;
     // A node that generated its own kind (image placeholder → image,
     // video node → video, audio node → audio) is filled in place; a
     // config hub gets a fresh result node beside it, as before.
@@ -738,7 +739,8 @@ export async function deliverGeneratedFile(
       posterBlobKey,
       title: resultTitle,
       content: "",
-      prompt: resultPrompt,
+      prompt: nodeOwnPromptText,
+      recordPrompt,
     });
     if (kind === "video") {
       // Fallback if pre-landing poster grab failed or project was missing.
@@ -767,7 +769,7 @@ export async function deliverGeneratedFile(
     if (landedRow) {
       await recordMediaAsset(db, landedRow, {
         title: resultTitle,
-        prompt: resultPrompt,
+        prompt: recordPrompt,
       });
     }
     ctx.invalidateQueries();

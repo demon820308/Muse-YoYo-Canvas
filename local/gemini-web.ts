@@ -51,13 +51,57 @@ const STATUS_TTL_MS = 30_000;
 
 const TEXTBOX_SEL =
   'rich-textarea div[contenteditable="true"], div[contenteditable="true"][role="textbox"], [role="textbox"]';
-const SEND_BTN_SEL =
-  'button[aria-label*="Send"], button[aria-label*="发送"], button.send-button';
-const STOP_BTN_SEL = 'button[aria-label*="Stop"], button[aria-label*="停止"]';
+const COMPOSER_ROOT_SEL =
+  'input-area-v2, .input-area-container, .input-area, chat-window-content, main';
+const SIDEBAR_EXCLUDE_SEL =
+  'bard-sidenav, sidenav, conversations-list, .conversations-container, .side-nav';
+const SEND_BTN_SELECTORS = [
+  'button.send-button',
+  'button[aria-label="Send message"]',
+  'button[aria-label="发送"]',
+  'button[aria-label*="Send"]',
+  'button[aria-label*="发送"]',
+];
+const STOP_BTN_SELECTORS = [
+  'button[aria-label="Stop response"]',
+  'button[aria-label="停止回答"]',
+  'button[aria-label*="Stop"]',
+  'button[aria-label*="停止"]',
+];
 const DOWNLOAD_BTN_SEL =
   'button[aria-label*="Download full size"], button[aria-label*="下载完整尺寸"], button[aria-label*="Download"], button[aria-label*="下载"], button[mattooltip*="Download"], button[mattooltip*="下载"], [data-test-id*="download"]';
-const UPLOAD_TRIGGER_SEL =
-  'button[aria-label*="上传和工具"], button[aria-label*="Upload"], button[aria-label*="Add file"], button[aria-label*="上传"], button[aria-label*="添加"]';
+const UPLOAD_TRIGGER_SELECTORS = [
+  'button[aria-label*="上传和工具"]',
+  'button[aria-label*="Open upload file menu"]',
+  'button[aria-label*="Upload file"]',
+  'button[aria-label*="Upload image"]',
+  'button[aria-label*="Add file"]',
+  'button[aria-label*="上传文件"]',
+  'button[aria-label*="上传图片"]',
+  'button.upload-card-button',
+];
+const IMAGE_TOOL_CHIP_SEL =
+  'button[aria-label*="取消选择“图片”"], button[aria-label*="Deselect"], button[aria-label*="Remove image"]';
+const IMAGE_TOOL_MENU_RE_SRC = '(制作图片|生成图片|Create images?|Generate images?)';
+
+function buildScopedSelectorEval(selectors: string[]): string {
+  return `((sels, tbSel, rootSel, sideSel) => {
+    const tb = document.querySelector(tbSel);
+    const root = (tb && tb.closest(rootSel)) || document;
+    const pick = (scope) => {
+      for (const s of sels) {
+        const list = Array.from(scope.querySelectorAll(s));
+        for (const el of list) {
+          if (el.closest(sideSel)) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) return el;
+        }
+      }
+      return null;
+    };
+    return pick(root) || pick(document);
+  })(${JSON.stringify(selectors)}, ${JSON.stringify(TEXTBOX_SEL)}, ${JSON.stringify(COMPOSER_ROOT_SEL)}, ${JSON.stringify(SIDEBAR_EXCLUDE_SEL)})`;
+}
 
 export function resolveBrowserBin(
   platform = process.platform,
@@ -736,7 +780,61 @@ export async function generateImageWithGeminiWeb(opts: {
         );
       }
 
-      // 2. 若有参考图/蒙版图，先展开上传菜单并定位 image/* 文件输入框，通过 CDP 注入文件
+      // 2. 开启「制作图片」工具（避免复杂编辑/蒙版指令回落成纯文本模型拒答）
+      const triggerFinder = buildScopedSelectorEval(UPLOAD_TRIGGER_SELECTORS);
+      const imageToolActive = await pageCdp
+        .evalJs<boolean>(`(() => {
+          const tb = document.querySelector(${JSON.stringify(TEXTBOX_SEL)});
+          const root = (tb && tb.closest(${JSON.stringify(COMPOSER_ROOT_SEL)})) || document;
+          return !!root.querySelector(${JSON.stringify(IMAGE_TOOL_CHIP_SEL)});
+        })()`)
+        .catch(() => false);
+      if (!imageToolActive) {
+        const opened = await pageCdp
+          .evalJs<boolean>(`(() => {
+            const btn = ${triggerFinder};
+            if (btn) { btn.click(); return true; }
+            return false;
+          })()`)
+          .catch(() => false);
+        if (opened) {
+          let toolState: "clicked" | "already" | "missing" = "missing";
+          const menuDeadline = Date.now() + 2_000;
+          while (Date.now() < menuDeadline) {
+            toolState = await pageCdp
+              .evalJs<"clicked" | "already" | "missing">(`(() => {
+                const re = new RegExp(${JSON.stringify(IMAGE_TOOL_MENU_RE_SRC)}, 'i');
+                const items = Array.from(document.querySelectorAll('[role="menuitemcheckbox"], [role="menuitem"], .cdk-overlay-container button'));
+                const target = items.find(el => re.test((el.textContent || '').trim()));
+                if (!target) return 'missing';
+                if (target.getAttribute('aria-checked') === 'true') return 'already';
+                target.click();
+                return 'clicked';
+              })()`)
+              .catch(() => "missing" as const);
+            if (toolState !== "missing") break;
+            await Bun.sleep(200);
+          }
+          if (toolState === "already" || toolState === "missing") {
+            const menuOpen = await pageCdp
+              .evalJs<boolean>("!!document.querySelector('.cdk-overlay-container [role=\"menu\"]')")
+              .catch(() => false);
+            if (menuOpen) {
+              await pageCdp
+                .send("Input.dispatchKeyEvent", {
+                  type: "keyDown",
+                  key: "Escape",
+                  code: "Escape",
+                  windowsVirtualKeyCode: 27,
+                })
+                .catch(() => {});
+            }
+          }
+          await Bun.sleep(300);
+        }
+      }
+
+      // 3. 若有参考图/蒙版图，展开上传菜单并定位 image/* 文件输入框，通过 CDP 注入文件并等待上传完成
       if (opts.refFilePaths.length > 0) {
         const uploadAttempt = async (): Promise<number | null> => {
           const doc = await pageCdp!.send<{ root: { nodeId: number } }>("DOM.getDocument");
@@ -753,13 +851,19 @@ export async function generateImageWithGeminiWeb(opts: {
         };
         let fileInputNodeId = await uploadAttempt();
         if (!fileInputNodeId) {
-          await pageCdp.evalJs(`(() => {
-            const btn = document.querySelector(${JSON.stringify(UPLOAD_TRIGGER_SEL)});
-            if (btn) { btn.click(); return true; }
-            return false;
-          })()`);
-          await Bun.sleep(700);
-          fileInputNodeId = await uploadAttempt();
+          for (let attempt = 0; attempt < 2 && !fileInputNodeId; attempt += 1) {
+            await pageCdp.evalJs(`(() => {
+              const btn = ${triggerFinder};
+              if (btn) { btn.click(); return true; }
+              return false;
+            })()`);
+            const waitEnd = Date.now() + 2_500;
+            while (Date.now() < waitEnd) {
+              await Bun.sleep(350);
+              fileInputNodeId = await uploadAttempt();
+              if (fileInputNodeId) break;
+            }
+          }
         }
         if (!fileInputNodeId) {
           throw new Error(
@@ -770,24 +874,42 @@ export async function generateImageWithGeminiWeb(opts: {
           nodeId: fileInputNodeId,
           files: opts.refFilePaths,
         });
-        const attachDeadline = Date.now() + 8_000;
+        const attachDeadline = Date.now() + 20_000;
+        let lastAttach = { attached: 0, spinners: 0 };
         while (Date.now() < attachDeadline) {
-          const attached = await pageCdp
-            .evalJs<number>("document.querySelectorAll('gem-media-attachment').length")
-            .catch(() => 0);
-          if (attached >= opts.refFilePaths.length) break;
-          await Bun.sleep(300);
+          if (opts.signal?.aborted) throw new Error("任务已取消");
+          lastAttach = await pageCdp
+            .evalJs<{ attached: number; spinners: number }>(`(() => {
+              const tb = document.querySelector(${JSON.stringify(TEXTBOX_SEL)});
+              const root = (tb && tb.closest(${JSON.stringify(COMPOSER_ROOT_SEL)})) || document;
+              const attached = root.querySelectorAll('gem-media-attachment, uploader-file-preview, user-query-file-preview').length;
+              const spinners = root.querySelectorAll('mat-spinner, mat-progress-spinner, [role="progressbar"]').length;
+              return { attached, spinners };
+            })()`)
+            .catch(() => ({ attached: 0, spinners: 1 }));
+          if (lastAttach.attached >= opts.refFilePaths.length && lastAttach.spinners === 0) {
+            break;
+          }
+          await Bun.sleep(350);
         }
-        await Bun.sleep(400);
-        await pageCdp
-          .send("Input.dispatchKeyEvent", {
-            type: "keyDown",
-            key: "Escape",
-            code: "Escape",
-            windowsVirtualKeyCode: 27,
-          })
-          .catch(() => {});
-        await Bun.sleep(250);
+        if (lastAttach.attached < opts.refFilePaths.length || lastAttach.spinners > 0) {
+          throw new Error("Gemini 网页参考图上传未完成或超时，请稍后重试");
+        }
+        await Bun.sleep(350);
+        const menuOpen = await pageCdp
+          .evalJs<boolean>("!!document.querySelector('.cdk-overlay-container [role=\"menu\"]')")
+          .catch(() => false);
+        if (menuOpen) {
+          await pageCdp
+            .send("Input.dispatchKeyEvent", {
+              type: "keyDown",
+              key: "Escape",
+              code: "Escape",
+              windowsVirtualKeyCode: 27,
+            })
+            .catch(() => {});
+          await Bun.sleep(200);
+        }
       }
 
       // 3. 记录发送前已有 AI 回复与图片，严格排除用户提问区/附件区图片
@@ -826,8 +948,9 @@ export async function generateImageWithGeminiWeb(opts: {
       await pageCdp.send("Input.insertText", { text: finalPrompt });
       await Bun.sleep(250);
 
+      const sendFinder = buildScopedSelectorEval(SEND_BTN_SELECTORS);
       const clickedSend = await pageCdp.evalJs<boolean>(`(() => {
-        const btn = document.querySelector(${JSON.stringify(SEND_BTN_SEL)});
+        const btn = ${sendFinder};
         if (btn && !btn.disabled) { btn.click(); return true; }
         return false;
       })()`);
@@ -853,15 +976,17 @@ export async function generateImageWithGeminiWeb(opts: {
       const genDeadline = Date.now() + 120_000;
       while (Date.now() < genDeadline) {
         if (opts.signal?.aborted) throw new Error("任务已取消");
+        const stopFinder = buildScopedSelectorEval(STOP_BTN_SELECTORS);
         const poll = await pageCdp.evalJs<{
           url: string;
           stopVisible: boolean;
           srcs: string[];
           respCount: number;
           modelText: string;
+          hasPendingImage: boolean;
         }>(`(() => {
-          const stop = document.querySelector(${JSON.stringify(STOP_BTN_SEL)});
-          const stopVisible = !!(stop && stop.getBoundingClientRect().width > 0);
+          const stop = ${stopFinder};
+          const stopVisible = !!stop;
           const srcs = Array.from(document.querySelectorAll('img'))
             .filter(i => {
               if (i.closest(${JSON.stringify(EXCLUDED_ANCESTOR_SEL)})) return false;
@@ -872,8 +997,18 @@ export async function generateImageWithGeminiWeb(opts: {
             .map(i => i.currentSrc || i.src || '');
           const resps = document.querySelectorAll('model-response');
           const lastResp = resps[resps.length - 1];
-          const modelText = lastResp ? (lastResp.textContent || '').trim() : '';
-          return { url: location.href, stopVisible, srcs, respCount: resps.length, modelText };
+          const hasPendingImage = !!lastResp && (
+            !!lastResp.querySelector('generated-image, single-image, .generated-image, .loader, mat-spinner, mat-progress-spinner, [role="progressbar"]') ||
+            Array.from(lastResp.querySelectorAll('img')).some(i => {
+              if (i.closest(${JSON.stringify(EXCLUDED_ANCESTOR_SEL)})) return false;
+              const s = i.currentSrc || i.src || '';
+              return !s.includes('/a/') && (!i.complete || i.naturalWidth === 0);
+            })
+          );
+          const contentEl = lastResp?.querySelector('message-content, .markdown, .model-response-text');
+          const rawText = ((contentEl || lastResp)?.textContent || '').trim();
+          const modelText = rawText.replace(/^Gemini\\s*(?:说|said)\\s*/i, '').trim();
+          return { url: location.href, stopVisible, srcs, respCount: resps.length, modelText, hasPendingImage };
         })()`);
 
         if (poll.url.toLowerCase().includes("accounts.google.com")) {
@@ -891,6 +1026,7 @@ export async function generateImageWithGeminiWeb(opts: {
         }
         if (
           fresh.length === 0 &&
+          !poll.hasPendingImage &&
           poll.respCount > beforeState.respCount &&
           !poll.stopVisible &&
           poll.modelText.length > 0
