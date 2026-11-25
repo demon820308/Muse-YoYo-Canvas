@@ -219,6 +219,7 @@ export const generationRecords = sqliteTable("generation_records", {
   genKind: text("gen_kind", {
     enum: ["image", "video", "audio", "text", "tool"],
   }),
+  genEngine: text("gen_engine"),
   prompt: text("prompt").notNull().default(""),
   genRatio: text("gen_ratio"),
   // Measured pixel size of the delivered file (same provenance rule

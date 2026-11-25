@@ -34,6 +34,7 @@ import {
 } from "../types";
 import { NODE_DEFAULTS } from "./use-node-ops";
 import { useAgyStatus } from "./use-agy";
+import { useGeminiWebStatus } from "./use-gemini-web";
 
 type Viewport = { x: number; y: number; zoom: number };
 
@@ -78,6 +79,7 @@ export function useGeneration({
 }) {
 const queryClient = useQueryClient();
 const agy = useAgyStatus();
+const geminiWeb = useGeminiWebStatus();
 const [genBusyId, setGenBusyId] = useState<string | null>(null);
 // Node whose generation request is in flight from THIS page (the
 // server's genStatus only becomes visible after the action call
@@ -266,16 +268,27 @@ const runGeneration = useCallback(
     setDirectGenId(node.id);
     try {
       await flushSave();
-      const engine = agy.effectiveEngineFor(
-        node.id,
-        node.type === "image" ? "agy" : "muse",
-      );
-      const nodeInputs =
-        buildInputsByNodeId(nodesRef.current, edgesRef.current).get(node.id) ?? [];
-      const hasMaskInput = nodeInputs.some((n) => n.type === "image-mask");
       const isImageGen =
         node.type === "image" ||
         (node.type === "config" && (node.genMode ?? "image") === "image");
+      const hasExplicitEngine = Boolean(agy.status?.nodeEngines?.[node.id]);
+      const defaultEngine = isImageGen
+        ? geminiWeb.ready
+          ? "gemini-web"
+          : agy.ready
+            ? "agy"
+            : "muse"
+        : "muse";
+      const engine = hasExplicitEngine
+        ? agy.effectiveEngineFor(
+            node.id,
+            defaultEngine,
+            isImageGen ? geminiWeb.ready : false,
+          )
+        : undefined;
+      const nodeInputs =
+        buildInputsByNodeId(nodesRef.current, edgesRef.current).get(node.id) ?? [];
+      const hasMaskInput = nodeInputs.some((n) => n.type === "image-mask");
       const maskMode =
         hasMaskInput && isImageGen ? readNodeMaskMode(node.id) : undefined;
       const res =
@@ -332,6 +345,7 @@ const runGeneration = useCallback(
       setGenBusyId(null);
       setDirectGenId(null);
       void queryClient.invalidateQueries({ queryKey: ["agy-status"] });
+      void queryClient.invalidateQueries({ queryKey: ["gemini-web-status"] });
       void refreshGraphFromServer();
     }
   },

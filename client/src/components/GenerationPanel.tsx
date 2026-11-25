@@ -37,6 +37,7 @@ import {
 } from "../types";
 import { RatioSelect } from "./RatioSelect";
 import { useAgyStatus, type AgyEngine } from "../hooks/use-agy";
+import { useGeminiWebStatus } from "../hooks/use-gemini-web";
 import {
   closestImageRatio,
   getMaskEditModeMeta,
@@ -88,6 +89,7 @@ export function GenerationPanel({
   feedback?: NodeRunFeedback;
 }) {
   const agy = useAgyStatus();
+  const geminiWeb = useGeminiWebStatus();
   const isConfig = node.type === "config";
   const mode: GenMode = isConfig ? (node.genMode ?? "image") : node.type === "video" ? "video" : node.type === "audio" ? "audio" : "image";
   const maskRef =
@@ -558,7 +560,14 @@ export function GenerationPanel({
           <select
             value={agy.effectiveEngineFor(
               node.id,
-              node.type === "image" ? "agy" : "muse",
+              mode === "image"
+                ? geminiWeb.ready
+                  ? "gemini-web"
+                  : agy.ready
+                    ? "agy"
+                    : "muse"
+                : "muse",
+              mode === "image" ? geminiWeb.ready : false,
             )}
             onChange={(e) => {
               const next = e.target.value as AgyEngine;
@@ -566,23 +575,31 @@ export function GenerationPanel({
             }}
             aria-label="选择生成通道"
             title={
-              agy.ready
-                ? "选择本节点走 Muse 桥或本地 AGY"
-                : "需先在顶部「AGY 引擎」完成部署、登录并启用后才可切换"
+              agy.ready || geminiWeb.ready
+                ? "选择本节点走 Muse 桥、本地 AGY 或 Gemini 网页版"
+                : "需先在顶部「AGY 引擎」或「Gemini 网页」完成登录后才可切换"
             }
             className="h-9 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2.5 text-xs text-[var(--text)] outline-none focus:border-[var(--accent)]"
           >
             <option value="muse">
-              {node.type === "image" && agy.ready ? "Muse 桥" : "Muse 桥（默认）"}
+              {mode === "image" && (agy.ready || geminiWeb.ready)
+                ? "Muse 桥"
+                : "Muse 桥（默认）"}
             </option>
             <option value="agy" disabled={!agy.ready}>
               {mode === "image"
-                ? `Nano Banana · AGY${node.type === "image" && agy.ready ? "（默认）" : ""}`
+                ? `Nano Banana · AGY${!geminiWeb.ready && agy.ready ? "（默认）" : ""}`
                 : agy.ready
                   ? `${agy.shortModelName} · AGY`
                   : "AGY"}
               {!agy.ready ? "（未就绪）" : ""}
             </option>
+            {mode === "image" ? (
+              <option value="gemini-web" disabled={!geminiWeb.ready}>
+                Gemini 网页版 (Pro)
+                {geminiWeb.ready ? "（默认）" : "（需登录）"}
+              </option>
+            ) : null}
           </select>
         ) : null}
         {!inlineVideoParams && (!inlineImageParams || isConfig) ? (

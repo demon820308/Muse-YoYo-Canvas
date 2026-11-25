@@ -19,6 +19,7 @@ import {
 } from "../types";
 import { IconCheck, IconPlay } from "../icons";
 import { useAgyStatus, type AgyEngine } from "../hooks/use-agy";
+import { useGeminiWebStatus } from "../hooks/use-gemini-web";
 
 /** 生成配置 node body, structured after the user's spec sheet: mode
  * tabs on top, live reference-count chips (counted from the node's
@@ -50,9 +51,21 @@ export function ConfigNodeBody({
   onOpenComposer: (node: CanvasNode) => void;
 }) {
   const agy = useAgyStatus();
+  const geminiWeb = useGeminiWebStatus();
   const mode: GenMode = node.genMode ?? "image";
   const supportsAgy = mode === "image" || mode === "text";
-  const engine: AgyEngine = supportsAgy ? agy.effectiveEngineFor(node.id) : "muse";
+  const imageDefaultEngine: AgyEngine = geminiWeb.ready
+    ? "gemini-web"
+    : agy.ready
+      ? "agy"
+      : "muse";
+  const engine: AgyEngine = supportsAgy
+    ? agy.effectiveEngineFor(
+        node.id,
+        mode === "image" ? imageDefaultEngine : "muse",
+        mode === "image" ? geminiWeb.ready : false,
+      )
+    : "muse";
   const textCount = inputs.filter((n) => n.type === "text").length;
   const imageCount = inputs.filter((n) => n.type === "image").length;
   const videoCount = inputs.filter((n) => n.type === "video").length;
@@ -138,15 +151,25 @@ export function ConfigNodeBody({
             className="w-auto max-w-[165px] shrink-0 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[11px] text-[var(--text)]"
             aria-label="选择生成通道"
           >
-            <option value="muse">Muse 桥（默认）</option>
+            <option value="muse">
+              {mode === "image" && (geminiWeb.ready || agy.ready)
+                ? "Muse 桥"
+                : "Muse 桥（默认）"}
+            </option>
             <option value="agy" disabled={!agy.ready}>
               {mode === "image"
-                ? "Nano Banana · AGY"
+                ? `Nano Banana · AGY${!geminiWeb.ready && agy.ready ? "（默认）" : ""}`
                 : agy.ready
                   ? `${agy.shortModelName} · AGY`
                   : "AGY"}
               {!agy.ready ? "（需部署并登录）" : ""}
             </option>
+            {mode === "image" ? (
+              <option value="gemini-web" disabled={!geminiWeb.ready}>
+                Gemini 网页版 (Pro)
+                {geminiWeb.ready ? "（默认）" : "（需登录）"}
+              </option>
+            ) : null}
           </select>
         ) : (
           <select

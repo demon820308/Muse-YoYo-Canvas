@@ -22,6 +22,35 @@ import {
 
 export type GenerationOutcomeStatus = "done" | "failed" | "stopped" | "cancelled";
 
+export const genEngineSchema = z.enum(["muse", "agy", "gemini-web", "local"]);
+export type GenEngineSource = z.infer<typeof genEngineSchema>;
+
+const LOCAL_TOOL_NODE_TYPES = new Set([
+  "video-frames",
+  "audio-extract",
+  "video-compose",
+]);
+
+function inferEngineFromFilePath(filePath: string | null | undefined): GenEngineSource | null {
+  if (!filePath) return null;
+  const base = filePath.split(/[\\/]/).pop() ?? "";
+  if (base.startsWith("gw-")) return "gemini-web";
+  if (base.startsWith("nb-")) return "agy";
+  return null;
+}
+
+export function inferGenerationEngine(node: {
+  type: NodeRow["type"];
+  genTaskId?: string | null;
+  filePath?: string | null;
+}): GenEngineSource {
+  if (node.genTaskId?.startsWith("gweb-")) return "gemini-web";
+  if (node.genTaskId?.startsWith("agy-")) return "agy";
+  if (LOCAL_TOOL_NODE_TYPES.has(node.type)) return "local";
+  if (node.genTaskId?.startsWith("bridge-")) return "muse";
+  return inferEngineFromFilePath(node.filePath) ?? "muse";
+}
+
 export type GenerationOutcome = {
   status: GenerationOutcomeStatus;
   error?: string | null;
@@ -34,6 +63,7 @@ export type GenerationOutcome = {
   genSize?: string | null;
   /** The run's effective prompt, when the landing assembled one. */
   prompt?: string;
+  genEngine?: GenEngineSource | null;
 };
 
 /** The run's start instant: genStartedAt once the run was claimed /
@@ -79,6 +109,7 @@ export async function recordGenerationOutcome(
       nodeTitle: node.title,
       nodeType: node.type,
       genKind: node.genKind,
+      genEngine: outcome.genEngine ?? inferGenerationEngine(node),
       prompt: outcome.prompt ?? (node.prompt || node.content).trim(),
       genRatio: node.genRatio,
       genSize: outcome.genSize ?? node.genSize,
@@ -143,6 +174,7 @@ const recordShape = z.object({
   title: z.string(),
   nodeType: nodeType,
   genKind: genKindEnum.nullable(),
+  genEngine: genEngineSchema.nullable(),
   prompt: z.string(),
   genRatio: z.string().nullable(),
   genSize: z.string().nullable(),
@@ -175,6 +207,8 @@ export const GenerationRecordsActions = {
         .from(schema.canvasNodes)
         .where(eq(schema.canvasNodes.projectId, args.projectId));
       const liveIds = new Set(nodeRows.map((n) => n.id));
+      const parseStoredEngine = (v: string | null): GenEngineSource | null =>
+        v === "muse" || v === "agy" || v === "gemini-web" || v === "local" ? v : null;
       const records = await Promise.all(
         rows.map(async (r) => ({
           id: r.id,
@@ -186,6 +220,11 @@ export const GenerationRecordsActions = {
           title: r.nodeTitle,
           nodeType: r.nodeType,
           genKind: r.genKind,
+          genEngine:
+            parseStoredEngine(r.genEngine) ??
+            (LOCAL_TOOL_NODE_TYPES.has(r.nodeType)
+              ? "local"
+              : inferEngineFromFilePath(r.filePath) ?? "muse"),
           prompt: r.prompt,
           genRatio: r.genRatio,
           genSize: r.genSize,

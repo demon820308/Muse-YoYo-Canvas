@@ -66,7 +66,12 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 import * as schema from "../schema";
 import { nodeType, TOOL_TYPES, genStatusEnum, genKindEnum, okResponse, genResult, completeResult, type Db } from "./contracts";
 import { getNodeRow, getProjectRow, landMediaResult, recordMediaAsset, markFailed, markWorking, forkSiblingForRegen } from "./graph-helpers";
-import { recordGenerationOutcome } from "./generation-records";
+import {
+  genEngineSchema,
+  inferGenerationEngine,
+  recordGenerationOutcome,
+  type GenEngineSource,
+} from "./generation-records";
 import { expandHome, isInProjectDir } from "./project-dirs";
 import { clampVideoSeconds } from "./ratios";
 import { dispatchImageGeneration, dispatchVideoGeneration, dispatchAudioGeneration, dispatchConfigGeneration, dispatchGeneration, queueKindFor } from "./generation-dispatch";
@@ -80,7 +85,7 @@ export const GenerationActions = {
     request: z.object({
       projectId: z.string(),
       nodeId: z.string(),
-      engine: z.enum(["muse", "agy"]).optional(),
+      engine: z.enum(["muse", "agy", "gemini-web"]).optional(),
       maskMode: z.enum(["remove", "outfit", "face", "custom"]).optional(),
     }),
     response: genResult,
@@ -170,7 +175,7 @@ export const GenerationActions = {
     request: z.object({
       projectId: z.string(),
       nodeId: z.string(),
-      engine: z.enum(["muse", "agy"]).optional(),
+      engine: z.enum(["muse", "agy", "gemini-web"]).optional(),
       maskMode: z.enum(["remove", "outfit", "face", "custom"]).optional(),
     }),
     response: genResult,
@@ -183,15 +188,13 @@ export const GenerationActions = {
       if (args.engine) {
         ctx.localAgy?.setNodeEngine(node.id, args.engine);
       }
-      const effectiveEngine =
-        args.engine ?? ctx.localAgy?.getNodeEngine(node.id) ?? "muse";
       await markWorking(db, node.id, { genKind: node.genMode ?? "image" });
       const fresh = (await getNodeRow(db, node.id)) ?? node;
       const result = await dispatchConfigGeneration(
         ctx,
         db,
         fresh,
-        effectiveEngine,
+        args.engine,
         args.maskMode,
       );
       ctx.invalidateQueries();
@@ -267,7 +270,7 @@ export const GenerationActions = {
     request: z.object({
       projectId: z.string(),
       nodeId: z.string(),
-      engine: z.enum(["muse", "agy"]).optional(),
+      engine: z.enum(["muse", "agy", "gemini-web"]).optional(),
     }),
     response: okResponse,
     handler: async (ctx, args): Promise<z.infer<typeof okResponse>> => {
@@ -316,6 +319,7 @@ export const GenerationActions = {
           nodeTitle: z.string(),
           nodeType: nodeType,
           genKind: genKindEnum.nullable(),
+          genEngine: genEngineSchema.nullable(),
           genStatus: genStatusEnum,
           genStartedAt: z.string().nullable(),
           prompt: z.string(),
@@ -335,6 +339,29 @@ export const GenerationActions = {
         .orderBy(asc(schema.canvasNodes.updatedAt));
       const projectRows = await db.select().from(schema.projects);
       const names = new Map(projectRows.map((p) => [p.id, p.name]));
+      const hasQueued = rows.some((n) => n.genStatus === "queued" && !n.genTaskId);
+      const gwebReady = hasQueued
+        ? Boolean(ctx.localGeminiWeb && (await ctx.localGeminiWeb.isReady()))
+        : false;
+      const agyReady = hasQueued
+        ? Boolean(ctx.localAgy && (await ctx.localAgy.isReady()))
+        : false;
+      const resolveRequestEngine = (n: (typeof rows)[number]): GenEngineSource => {
+        if (n.genTaskId || n.genStatus === "working") {
+          return inferGenerationEngine(n);
+        }
+        const isImg =
+          n.type === "image" || (n.type === "config" && (n.genMode ?? "image") === "image");
+        if (isImg) {
+          const def = gwebReady ? "gemini-web" : agyReady ? "agy" : "muse";
+          return ctx.localAgy?.getNodeEngine(n.id, def) ?? def;
+        }
+        if (n.type === "config" && n.genMode === "text") {
+          const picked = ctx.localAgy?.getNodeEngine(n.id, "muse");
+          return picked === "agy" && agyReady ? "agy" : "muse";
+        }
+        return inferGenerationEngine(n);
+      };
       return {
         requests: rows.map((n) => ({
           projectId: n.projectId,
@@ -344,6 +371,7 @@ export const GenerationActions = {
           nodeTitle: n.title,
           nodeType: n.type,
           genKind: n.genKind,
+          genEngine: resolveRequestEngine(n),
           genStatus: n.genStatus,
           genStartedAt: n.genStartedAt ? n.genStartedAt.toISOString() : null,
           prompt: (n.prompt || n.content).trim(),
@@ -564,6 +592,8 @@ export const GenerationActions = {
           .where(eq(schema.canvasNodes.id, node.id));
         if (node.genTaskId?.startsWith("agy-")) {
           ctx.localAgy?.cancelTask(node.genTaskId);
+        } else if (node.genTaskId?.startsWith("gweb-")) {
+          ctx.localGeminiWeb?.cancelTask(node.genTaskId);
         }
         await cancelNodeBridgeJobs(db, node.id);
         ctx.invalidateQueries();

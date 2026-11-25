@@ -420,12 +420,19 @@ export function NodeCard({
                 />
               ) : null}
               {videoPaused && !videoLoading ? (
-                <span
-                  className="pointer-events-none absolute left-1/2 top-1/2 flex h-14 w-14 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/60 text-white shadow-lg"
-                  aria-hidden="true"
+                <button
+                  type="button"
+                  aria-label={`播放视频 ${node.title}`}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onPointerUp={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleVideo();
+                  }}
+                  className="absolute left-1/2 top-1/2 z-10 flex h-14 w-14 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-black/60 text-white shadow-lg transition-transform hover:scale-105 hover:bg-black/75"
                 >
                   <IconPlay size={28} />
-                </span>
+                </button>
               ) : null}
               {videoLoading ? (
                 <span

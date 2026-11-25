@@ -308,10 +308,12 @@ export type SpaceQueryInvalidationInput =
   | SpaceQueryInvalidation
   | SpaceQueryInvalidationBatch;
 
+export type LocalNodeEngine = "muse" | "agy" | "gemini-web";
+
 export interface LocalAgyClient {
   isReady(): Promise<boolean>;
-  getNodeEngine(nodeId: string, defaultEngine?: "muse" | "agy"): "muse" | "agy";
-  setNodeEngine(nodeId: string, engine: "muse" | "agy"): void;
+  getNodeEngine(nodeId: string, defaultEngine?: LocalNodeEngine): LocalNodeEngine;
+  setNodeEngine(nodeId: string, engine: LocalNodeEngine): void;
   copyNodeEngine(fromNodeId: string, toNodeId: string): void;
   startTask(runner: (opts: { signal: AbortSignal }) => Promise<void>): string;
   cancelTask(taskId: string): void;
@@ -332,11 +334,26 @@ export interface LocalAgyClient {
   }): Promise<{ text: string }>;
 }
 
+export interface LocalGeminiWebClient {
+  isReady(): Promise<boolean>;
+  startTask(runner: (opts: { signal: AbortSignal }) => Promise<void>): string;
+  cancelTask(taskId: string): void;
+  generateImage(opts: {
+    prompt: string;
+    ratio: string | null;
+    refFilePaths: string[];
+    outputDir: string;
+    fileNameBase: string;
+    signal?: AbortSignal;
+  }): Promise<{ filePath: string }>;
+}
+
 export interface Ctx extends PortableCtx {
   readonly agent: AgentClient;
   readonly inference: InferenceClient;
   readonly tool: SpaceToolClient;
   readonly localAgy?: LocalAgyClient;
+  readonly localGeminiWeb?: LocalGeminiWebClient;
   emit(data: JsonValue): void;
   invalidateQueries(invalidation?: SpaceQueryInvalidationInput): void;
 }

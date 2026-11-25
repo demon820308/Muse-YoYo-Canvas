@@ -13,6 +13,7 @@ import {
 } from "../icons";
 import type { BridgeSummary } from "./BridgeSetupModal";
 import type { AgyStatus } from "../hooks/use-agy";
+import type { GeminiWebStatus } from "../hooks/use-gemini-web";
 import type { ProjectDialogState } from "./AppDialogs";
 import { ProjectMenuItem } from "./ProjectChrome";
 
@@ -52,6 +53,8 @@ export function TopProjectBar(props: {
   onOpenBridgeModal: () => void;
   agyStatus: AgyStatus | null;
   onOpenAgyModal: () => void;
+  geminiWebStatus: GeminiWebStatus | null;
+  onOpenGeminiWebModal: () => void;
   importReport: ImportReport | null;
   dismissImportReport: () => void;
 }) {
@@ -77,6 +80,8 @@ export function TopProjectBar(props: {
     onOpenBridgeModal,
     agyStatus,
     onOpenAgyModal,
+    geminiWebStatus,
+    onOpenGeminiWebModal,
     importReport,
     dismissImportReport,
   } = props;
@@ -281,6 +286,42 @@ export function TopProjectBar(props: {
                 }`}
               />
               <span>{agyLabel}</span>
+            </button>
+          );
+        })()}
+        {(() => {
+          const gwReady = Boolean(geminiWebStatus?.ready);
+          const gwLoggedIn = Boolean(geminiWebStatus?.loggedIn);
+          const gwBrowser = Boolean(geminiWebStatus?.browserFound);
+          const gwLabel = gwReady
+            ? "Gemini 网页已就绪"
+            : gwLoggedIn
+              ? "Gemini 网页待启用"
+              : gwBrowser
+                ? "Gemini 网页"
+                : "Gemini 网页(无浏览器)";
+          return (
+            <button
+              type="button"
+              onClick={onOpenGeminiWebModal}
+              className="hit-40 pointer-events-auto mr-1.5 flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 text-[12px] font-medium text-[var(--text)] shadow-sm transition-colors hover:bg-[var(--hover)]"
+              aria-label={gwLabel}
+              title={
+                gwReady
+                  ? "Gemini 网页版（Pro 会员）已就绪，免 API Key 按需无头生图"
+                  : "一键登录 Google AI Pro 账号，免 API Key 在后台按需调用 gemini.google.com 生图"
+              }
+            >
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  gwReady
+                    ? "bg-[var(--teal)]"
+                    : gwBrowser
+                      ? "bg-[var(--accent)]"
+                      : "bg-[var(--dim)]"
+                }`}
+              />
+              <span>{gwLabel}</span>
             </button>
           );
         })()}

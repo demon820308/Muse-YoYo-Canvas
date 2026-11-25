@@ -40,6 +40,12 @@ import {
   runAgyPrompt,
   setNodeEngine,
 } from "./agy";
+import {
+  cancelGeminiWebTask,
+  generateImageWithGeminiWeb,
+  getGeminiWebStatus,
+  registerGeminiWebTask,
+} from "./gemini-web";
 
 const handlerByName = Handlers as unknown as Record<
   string,
@@ -262,6 +268,17 @@ ${opts.prompt}`
         if (!text) throw new Error("AGY CLI 未返回有效文本内容");
         return { text };
       },
+    },
+
+    localGeminiWeb: {
+      async isReady() {
+        return (await getGeminiWebStatus(false)).ready;
+      },
+      startTask(runner) {
+        return registerGeminiWebTask((signal) => runner({ signal }));
+      },
+      cancelTask: cancelGeminiWebTask,
+      generateImage: generateImageWithGeminiWeb,
     },
 
     emit() {},

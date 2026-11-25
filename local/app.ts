@@ -18,6 +18,7 @@ import { handleAgent } from "./agent";
 import { handleAgy } from "./agy";
 import { handleBridge } from "./bridge";
 import { handleBridgeAdmin } from "./bridge-admin";
+import { handleGeminiWeb } from "./gemini-web";
 import { CLIENT_DIST, HOST, PORT } from "./config";
 import { createCtx } from "./ctx";
 import { openDb } from "./db";
@@ -129,6 +130,9 @@ const server = Bun.serve({
     }
     if (url.pathname.startsWith("/agy/")) {
       return handleAgy(req, url);
+    }
+    if (url.pathname.startsWith("/gemini-web/")) {
+      return handleGeminiWeb(req, url);
     }
     if (
       url.pathname === "/bridge-admin" ||

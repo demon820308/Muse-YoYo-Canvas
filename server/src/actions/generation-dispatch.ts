@@ -118,16 +118,20 @@ async function spawnImageGeneration(
  *    exact pixel size of the node's normalized ratio.
  * The empty-prompt failure is decided on the assembled prompt
  * before any routing, exactly as before. */
-async function dispatchAgyImageGeneration(
+async function dispatchLocalImageGeneration(
   ctx: Ctx,
   db: Db,
   node: NodeRow,
   prompt: string,
   refs: GenResource[],
+  provider: "agy" | "gemini-web",
 ): Promise<GenDispatch> {
-  if (!ctx.localAgy || !(await ctx.localAgy.isReady())) {
+  const client = provider === "agy" ? ctx.localAgy : ctx.localGeminiWeb;
+  if (!client || !(await client.isReady())) {
     const message =
-      "AGY CLI 尚未部署、登录或启用，请先在顶部「AGY 引擎」完成配置";
+      provider === "agy"
+        ? "AGY CLI 尚未部署、登录或启用，请先在顶部「AGY 引擎」完成配置"
+        : "Gemini 网页版尚未登录或启用，请先在顶部「Gemini 网页」完成一键登录";
     await markFailed(db, node.id, message);
     return { status: "failed", error: message };
   }
@@ -143,16 +147,18 @@ async function dispatchAgyImageGeneration(
     : expandHome("~/workspace/yoyo-canvas-projects");
   const ratio = normalizeImageRatio(node.genRatio);
   const refFilePaths = refs.map((r) => expandHome(r.filePath!));
-  const title = node.title ? `${node.title} · Nano Banana` : "Nano Banana 生图";
+  const label = provider === "agy" ? "Nano Banana" : "Gemini 网页";
+  const prefix = provider === "agy" ? "nb" : "gw";
+  const title = node.title ? `${node.title} · ${label}` : `${label} 生图`;
   let taskId = "";
-  taskId = ctx.localAgy.startTask(async ({ signal }) => {
+  taskId = client.startTask(async ({ signal }) => {
     try {
-      const produced = await ctx.localAgy!.generateImage({
+      const produced = await client.generateImage({
         prompt,
         ratio,
         refFilePaths,
         outputDir,
-        fileNameBase: `nb-${node.id.slice(0, 8)}`,
+        fileNameBase: `${prefix}-${node.id.slice(0, 8)}`,
         signal,
       });
       if (signal.aborted) return;
@@ -205,7 +211,7 @@ export async function dispatchImageGeneration(
   ctx: Ctx,
   db: Db,
   node: NodeRow,
-  engineOverride?: "muse" | "agy",
+  engineOverride?: "muse" | "agy" | "gemini-web",
   maskMode?: MaskEditMode,
 ): Promise<GenDispatch> {
   const rawPrompt = nodeOwnPrompt(node);
@@ -224,14 +230,28 @@ export async function dispatchImageGeneration(
     await markFailed(db, node.id, EMPTY_PROMPT_MESSAGE);
     return { status: "failed", error: EMPTY_PROMPT_MESSAGE };
   }
-  const defaultEngine =
-    node.type === "image" && ctx.localAgy && (await ctx.localAgy.isReady())
+  const agyReady = Boolean(ctx.localAgy && (await ctx.localAgy.isReady()));
+  const gwebReady = Boolean(
+    ctx.localGeminiWeb && (await ctx.localGeminiWeb.isReady()),
+  );
+  const defaultEngine = gwebReady
+    ? "gemini-web"
+    : agyReady
       ? "agy"
       : "muse";
   const engine =
-    engineOverride ?? ctx.localAgy?.getNodeEngine(node.id, defaultEngine) ?? "muse";
-  if (engine === "agy") {
-    return dispatchAgyImageGeneration(ctx, db, node, context.prompt, context.imageRefs);
+    engineOverride ??
+    ctx.localAgy?.getNodeEngine(node.id, defaultEngine) ??
+    defaultEngine;
+  if (engine === "agy" || engine === "gemini-web") {
+    return dispatchLocalImageGeneration(
+      ctx,
+      db,
+      node,
+      context.prompt,
+      context.imageRefs,
+      engine,
+    );
   }
   const ratio = normalizeImageRatio(node.genRatio);
   const hasReferenceMedia = context.refs.some(
@@ -481,7 +501,7 @@ async function dispatchConfigText(
   ctx: Ctx,
   db: Db,
   node: NodeRow,
-  engineOverride?: "muse" | "agy",
+  engineOverride?: "muse" | "agy" | "gemini-web",
 ): Promise<GenDispatch> {
   const rawPrompt = nodeOwnPrompt(node);
   const context = await buildGenerationContext(db, node, rawPrompt);
@@ -495,7 +515,9 @@ async function dispatchConfigText(
       ? "agy"
       : "muse";
   const engine =
-    engineOverride ?? ctx.localAgy?.getNodeEngine(node.id, defaultEngine) ?? "muse";
+    engineOverride ??
+    ctx.localAgy?.getNodeEngine(node.id, defaultEngine) ??
+    defaultEngine;
   if (engine === "agy") {
     if (!ctx.localAgy || !(await ctx.localAgy.isReady())) {
       const message =
@@ -610,7 +632,7 @@ export async function dispatchConfigGeneration(
   ctx: Ctx,
   db: Db,
   node: NodeRow,
-  engineOverride?: "muse" | "agy",
+  engineOverride?: "muse" | "agy" | "gemini-web",
   maskMode?: MaskEditMode,
 ): Promise<GenDispatch> {
   const mode = node.genMode ?? "image";
@@ -625,7 +647,7 @@ export async function dispatchGeneration(
   db: Db,
   node: NodeRow,
   kind: "image" | "video" | "audio" | "text",
-  engineOverride?: "muse" | "agy",
+  engineOverride?: "muse" | "agy" | "gemini-web",
 ): Promise<GenDispatch> {
   if (kind === "video") return dispatchVideoGeneration(ctx, db, node);
   if (kind === "audio") return dispatchAudioGeneration(ctx, db, node);

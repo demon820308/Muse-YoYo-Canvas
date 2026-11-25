@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
-export type AgyEngine = "muse" | "agy";
+export type AgyEngine = "muse" | "agy" | "gemini-web";
 
 export type AgyModelOption = {
   id: string;
@@ -56,11 +56,27 @@ export function resolveEffectiveAgyEngine(
   nodeEngines: Record<string, AgyEngine> | undefined,
   nodeId: string,
   defaultEngine: AgyEngine = "muse",
+  geminiWebReady = false,
 ): AgyEngine {
-  if (!ready) return "muse";
+  const fallback: AgyEngine =
+    defaultEngine === "agy"
+      ? ready
+        ? "agy"
+        : "muse"
+      : defaultEngine === "gemini-web"
+        ? geminiWebReady
+          ? "gemini-web"
+          : "muse"
+        : "muse";
   const explicit = nodeEngines?.[nodeId];
-  if (explicit === "agy" || explicit === "muse") return explicit;
-  return defaultEngine;
+  if (explicit === "gemini-web") {
+    return geminiWebReady ? "gemini-web" : fallback;
+  }
+  if (explicit === "agy") {
+    return ready ? "agy" : "muse";
+  }
+  if (explicit === "muse") return "muse";
+  return fallback;
 }
 
 export async function fetchAgyStatus(refresh = false): Promise<AgyStatus> {
@@ -102,8 +118,18 @@ export function useAgyStatus() {
   );
 
   const effectiveEngineFor = useCallback(
-    (nodeId: string, defaultEngine: AgyEngine = "muse"): AgyEngine =>
-      resolveEffectiveAgyEngine(ready, status?.nodeEngines, nodeId, defaultEngine),
+    (
+      nodeId: string,
+      defaultEngine: AgyEngine = "muse",
+      geminiWebReady = false,
+    ): AgyEngine =>
+      resolveEffectiveAgyEngine(
+        ready,
+        status?.nodeEngines,
+        nodeId,
+        defaultEngine,
+        geminiWebReady,
+      ),
     [ready, status?.nodeEngines],
   );
 

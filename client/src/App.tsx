@@ -46,7 +46,9 @@ import { useToolbarActions } from "./hooks/use-toolbar-actions";
 import { AppDialogs } from "./components/AppDialogs";
 import { BridgeSetupModal, type BridgeSummary } from "./components/BridgeSetupModal";
 import { AgySetupModal } from "./components/AgySetupModal";
+import { GeminiWebSetupModal } from "./components/GeminiWebSetupModal";
 import { useAgyStatus } from "./hooks/use-agy";
+import { useGeminiWebStatus } from "./hooks/use-gemini-web";
 import { AppCanvasWorkspace } from "./components/AppCanvasWorkspace";
 import { TopProjectBar } from "./components/TopProjectBar";
 import { type PreviewTarget } from "./components/MediaPreviewDialog";
@@ -106,6 +108,8 @@ export function App() {
   const [bridgeModalOpen, setBridgeModalOpen] = useState(false);
   const [agyModalOpen, setAgyModalOpen] = useState(false);
   const { status: agyStatus } = useAgyStatus();
+  const [geminiWebModalOpen, setGeminiWebModalOpen] = useState(false);
+  const { status: geminiWebStatus } = useGeminiWebStatus();
   const [bridgeSummary, setBridgeSummary] = useState<BridgeSummary | null>(null);
   const [bridgeSummaryTimeout, setBridgeSummaryTimeout] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
@@ -885,6 +889,8 @@ export function App() {
         onOpenBridgeModal={() => setBridgeModalOpen(true)}
         agyStatus={agyStatus}
         onOpenAgyModal={() => setAgyModalOpen(true)}
+        geminiWebStatus={geminiWebStatus}
+        onOpenGeminiWebModal={() => setGeminiWebModalOpen(true)}
         importReport={importReport}
         dismissImportReport={() => setImportReport(null)}
       />
@@ -1142,6 +1148,12 @@ export function App() {
       <AgySetupModal
         open={agyModalOpen}
         onClose={() => setAgyModalOpen(false)}
+        showToast={showToast}
+      />
+
+      <GeminiWebSetupModal
+        open={geminiWebModalOpen}
+        onClose={() => setGeminiWebModalOpen(false)}
         showToast={showToast}
       />
     </div>

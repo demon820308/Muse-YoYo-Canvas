@@ -52,6 +52,45 @@ const RECORD_STATUS_META: Record<
   cancelled: { label: "已取消", color: "var(--dim)" },
 };
 
+const GEN_ENGINE_META: Record<
+  NonNullable<QueueRequest["genEngine"]>,
+  { label: string; cls: string }
+> = {
+  "gemini-web": {
+    label: "Gemini 网页版",
+    cls: "bg-[var(--teal-soft)] text-[var(--teal)]",
+  },
+  agy: {
+    label: "AGY",
+    cls: "bg-[var(--accent-soft)] text-[var(--accent)]",
+  },
+  muse: {
+    label: "Muse 桥",
+    cls: "bg-[var(--surface-3)] text-[var(--dim)]",
+  },
+  local: {
+    label: "本地工具",
+    cls: "bg-[var(--surface-3)] text-[var(--dim)]",
+  },
+};
+
+function GenEngineBadge({
+  engine,
+}: {
+  engine: QueueRequest["genEngine"] | GenerationRecord["genEngine"];
+}) {
+  if (!engine) return null;
+  const meta = GEN_ENGINE_META[engine];
+  return (
+    <span
+      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium leading-none ${meta.cls}`}
+      title={`生成来源：${meta.label}`}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
 function InFlightRow({
   r,
   nowMs,
@@ -80,6 +119,7 @@ function InFlightRow({
           {r.nodeSeq != null ? `#${r.nodeSeq} - ` : ""}
           {r.nodeTitle || "未命名节点"}
         </span>
+        <GenEngineBadge engine={r.genEngine} />
         <span className="shrink-0 text-[11px] text-[var(--dim)]">
           {working ? "生成中" : "排队中"}
         </span>
@@ -176,6 +216,7 @@ function RecordRow({
               {record.seq != null ? `#${record.seq} - ` : ""}
               {record.title || "未命名节点"}
             </span>
+            <GenEngineBadge engine={record.genEngine} />
             <span
               className="shrink-0 text-[11px] font-medium"
               style={{ color: meta.color }}

@@ -145,7 +145,8 @@ export function ToolNodeBody({
 }) {
   const agy = useAgyStatus();
   const { opts, patch } = useToolOptions(node.id);
-  const reverseEngine: AgyEngine = agy.effectiveEngineFor(node.id);
+  const reverseEngine: "muse" | "agy" =
+    agy.effectiveEngineFor(node.id) === "agy" ? "agy" : "muse";
   const fb = feedback ?? EMPTY_RUN_FEEDBACK;
   // A run is live from the local click (feedback.activeKey) — not
   // only once the server's genStatus lands — so the buttons react

@@ -19,8 +19,9 @@ import { homedir } from "node:os";
 import { extname, join, resolve } from "node:path";
 import { atomicWriteFileSync } from "./atomic-write";
 import { DATA_DIR, PROJECTS_DIR } from "./config";
+import { getGeminiWebStatus } from "./gemini-web";
 
-export type AgyEngine = "muse" | "agy";
+export type AgyEngine = "muse" | "agy" | "gemini-web";
 
 export type AgyModelOption = {
   id: string;
@@ -158,7 +159,7 @@ export function loadAgyConfig(): AgyConfig {
       const nodeEngines: Record<string, AgyEngine> = {};
       if (raw.nodeEngines && typeof raw.nodeEngines === "object") {
         for (const [k, v] of Object.entries(raw.nodeEngines)) {
-          if (v === "muse" || v === "agy") nodeEngines[k] = v;
+          if (v === "muse" || v === "agy" || v === "gemini-web") nodeEngines[k] = v;
         }
       }
       return {
@@ -185,7 +186,9 @@ export function getNodeEngine(
 ): AgyEngine {
   const cfg = loadAgyConfig();
   const explicit = cfg.nodeEngines[nodeId];
-  if (explicit === "agy" || explicit === "muse") return explicit;
+  if (explicit === "agy" || explicit === "muse" || explicit === "gemini-web") {
+    return explicit;
+  }
   return defaultEngine;
 }
 
@@ -201,7 +204,7 @@ export function copyNodeEngine(fromNodeId: string, toNodeId: string): void {
   if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) return;
   const cfg = loadAgyConfig();
   const engine = cfg.nodeEngines[fromNodeId];
-  if (engine === "agy" || engine === "muse") {
+  if (engine === "agy" || engine === "muse" || engine === "gemini-web") {
     cfg.nodeEngines[toNodeId] = engine;
     saveAgyConfig(cfg);
   }
@@ -1060,14 +1063,26 @@ export async function handleAgy(req: Request, url: URL): Promise<Response> {
     if (!body?.nodeId) {
       return Response.json({ error: "缺少 nodeId" }, { status: 400 });
     }
-    if (body.engine !== "muse" && body.engine !== "agy") {
-      return Response.json({ error: "engine 仅支持 muse 或 agy" }, { status: 400 });
+    if (body.engine !== "muse" && body.engine !== "agy" && body.engine !== "gemini-web") {
+      return Response.json(
+        { error: "engine 仅支持 muse、agy 或 gemini-web" },
+        { status: 400 },
+      );
     }
     if (body.engine === "agy") {
       const status = await getAgyStatus(false);
       if (!status.ready) {
         return Response.json(
           { error: "AGY CLI 尚未部署、登录或启用，暂不可选择" },
+          { status: 400 },
+        );
+      }
+    }
+    if (body.engine === "gemini-web") {
+      const status = await getGeminiWebStatus(false);
+      if (!status.ready) {
+        return Response.json(
+          { error: "Gemini 网页版尚未登录或启用，暂不可选择" },
           { status: 400 },
         );
       }
